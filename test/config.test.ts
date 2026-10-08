@@ -91,3 +91,23 @@ it("accepts true or false for complete-history synchronization and rejects ambig
   for (const allEvents of ["true", 1, null])
     expect(() => loadConfig({ window: { allEvents } }, {})).toThrow(/allEvents/);
 });
+
+it("preserves and validates local adoption and invitation protection policies", () => {
+  const credentials = {
+    google: { clientId: "id", clientSecret: "s", refreshToken: "r" },
+    icloud: { username: "u", appPassword: "p" },
+  };
+  const pair = {
+    name: "Calendar",
+    a: "google:primary",
+    b: "icloud:https://p1-caldav.icloud.com/cal/",
+    existingLinks: true,
+    protectInvitations: true,
+  };
+  expect(pairsFor(loadConfig({ ...credentials, pairs: [pair] }, {}))[0]).toMatchObject({
+    existingLinks: true,
+    protectInvitations: true,
+  });
+  for (const key of ["existingLinks", "protectInvitations"])
+    expect(() => loadConfig({ pairs: [{ ...pair, [key]: "true" }] }, {})).toThrow(key);
+});

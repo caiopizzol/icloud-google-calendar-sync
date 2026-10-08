@@ -483,3 +483,34 @@ day settings.
 Use distinct calendars for every pair. Never reuse a destination calendar in multiple
 pairs. With a finite window, edits that move a linked event outside the window may
 leave its counterpart stale; use `allEvents` for complete two-way reconciliation.
+
+### Existing originals and the guarded local runner
+
+If an original UID is already present on both calendars, ordinary sync stops before
+creating duplicate mirrors. Explicitly adopted originals can instead be linked with
+an application-provided `LinkStore`. Its state binds both calendar URLs and UIDs,
+records each side's baseline fingerprint, and preserves the existing objects. No
+provider writes are needed to initialize links. Initialize from complete snapshots
+only, after reviewing the proposed one-to-one matches.
+
+The link store is durable state, not a disposable cache. Keep it with the credentials
+and backups. A pending write is saved before the provider request and acknowledged
+only after verification. Missing or mismatched state must stop synchronization. Set
+`existingLinks: true` on adopted pairs to reject calls without their store. Initially
+divergent links can use `reviewOnChange: true`; later edits and deletions are held for
+review instead of overwriting provider-specific notes.
+
+For a local installation, `python3 scripts/run-local.py /private/config.json` uses an
+OS lock, atomic state files, private action records, and a week of compressed recovery
+snapshots. Each configured pair must use `allEvents`, `existingLinks: true` and
+`protectInvitations: true`, with a `<pair-name>.links.json` beside the config. The
+ordinary CLI and HTTP handler cannot supply this private filesystem state. Use
+`--dry` with the guarded runner to inspect both mirror and linked actions. Sample
+systemd user units are in `deploy/`; install only one active runner.
+
+`protectInvitations` allows invitation-bearing originals to be copied out, but holds
+writes back to those originals and does not stamp them for mirror-deletion propagation.
+Changes made directly on their provider still refresh their mirrors. This avoids
+incidental invitation updates during synchronization. Reminder-only edits are not
+tracked by the event fingerprint. Simultaneous edits use a whole-event winner rather
+than combining fields. Review these limits before enabling automatic synchronization.

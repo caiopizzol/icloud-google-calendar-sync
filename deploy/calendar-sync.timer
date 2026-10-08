@@ -1,0 +1,10 @@
+[Unit]
+Description=Synchronize personal calendars five minutes after each run
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=5min
+Unit=calendar-sync.service
+
+[Install]
+WantedBy=timers.target

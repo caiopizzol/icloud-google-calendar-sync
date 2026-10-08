@@ -8,6 +8,8 @@
 // missing originals or mirrors propagate deletion after an exact UID lookup.
 // Originals are stamped only after mirror creation when deletion is enabled.
 
+import { hasInvitations, reconcileLinks, type LinkStore } from "./links.js";
+
 import type { CalDavAuth, CalDavEvent } from "./caldav.js";
 import { deleteEvent, findByUid, listEvents, putEvent, scopedAuth, type RequestOptions } from "./caldav.js";
 import {
@@ -26,12 +28,19 @@ import {
   X_FP,
 } from "./ics.js";
 
-import { actionNotice, performAction, ActionObserverError, type ActionHooks } from "./execution.js";
+import { actionNotice, performAction, ActionObserverError, type ActionHooks, type ActionNotice } from "./execution.js";
 
-export type SyncOptions = RequestOptions & ActionHooks & { dryRun?: boolean };
+export type SyncOptions = RequestOptions & ActionHooks & { dryRun?: boolean; linkStore?: LinkStore };
 
 export type Side = { id: string; auth: CalDavAuth; url: string };
-export type Pair = { name: string; a: Side; b: Side; propagateDeletes?: boolean };
+export type Pair = {
+  name: string;
+  a: Side;
+  b: Side;
+  propagateDeletes?: boolean;
+  protectInvitations?: boolean;
+  existingLinks?: boolean;
+};
 export type Window = { start: Date; end: Date };
 
 export type Parsed = CalDavEvent & {
@@ -92,7 +101,7 @@ export function planDirection(
   to: Side,
   fromEvents: Parsed[],
   toEvents: Parsed[],
-  opts: { propagateDeletes?: boolean } = {},
+  opts: { propagateDeletes?: boolean; protectInvitations?: boolean } = {},
 ): Action[] {
   const propagate = opts.propagateDeletes === true;
   const originals = new Map(fromEvents.filter((e) => !e.source).map((e) => [e.uid, e]));
@@ -113,7 +122,8 @@ export function planDirection(
     const mirror = mirrors.get(uid);
     const mUid = mirrorUid(from.id, uid);
     const stamped = orig.mirroredOn.includes(to.id);
-    if (!mirror && stamped && propagate) {
+    const protectedInvitation = opts.protectInvitations && hasInvitations(orig);
+    if (!mirror && stamped && propagate && !protectedInvitation) {
       // The stamp says a mirror existed; it is gone → a human deleted it → delete the original too.
       actions.push({
         kind: "delete-if-mirror-gone",
@@ -141,7 +151,7 @@ export function planDirection(
       orig.fp !== mirror.fp &&
       mirror.fp !== mirror.fpAtCopy &&
       (orig.fp === mirror.fpAtCopy || mirror.modified > orig.modified);
-    if (propagate && !stamped && !mirrorEdited) {
+    if (propagate && !stamped && !mirrorEdited && !protectedInvitation) {
       actions.push({
         ...put(from.id, orig, withMirrored(orig.lines, to.id), `stamp ${uid} as mirrored on ${to.id}`),
         stamp: true,
@@ -161,6 +171,8 @@ export function planDirection(
           `re-stamp ${mirror.uid} (content already equal)`,
         ),
       );
+    } else if (mirrorEdited && protectedInvitation) {
+      continue;
     } else if (mirrorEdited) {
       // A human edited the copy: push it back, then re-stamp the copy.
       actions.push(
@@ -215,6 +227,7 @@ export type PairResult = {
   /** Stamp writes that failed. The original keeps syncing; deletes of its mirror will not propagate. */
   warnings?: string[];
   actions?: Action[];
+  linkedActions?: ActionNotice[];
 };
 
 export const window = (pastDays: number, futureDays: number, now = new Date()): Window => ({
@@ -224,6 +237,8 @@ export const window = (pastDays: number, futureDays: number, now = new Date()): 
 
 export async function syncPair(pair: Pair, win: Window | undefined, opts: SyncOptions = {}): Promise<PairResult> {
   opts.signal?.throwIfAborted();
+  if (pair.existingLinks && !opts.linkStore)
+    throw new Error("This pair requires its existing-link store; use the guarded local runner");
   pair = {
     ...pair,
     a: { ...pair.a, auth: scopedAuth(pair.a.auth, opts) },
@@ -250,19 +265,29 @@ export async function syncPair(pair: Pair, win: Window | undefined, opts: SyncOp
       mirrorUids.add(uid);
     }
   }
-  const actions = plan(pair, a, b);
+  if (opts.linkStore && win) throw new Error("Existing links require all-history synchronization");
+  const linked = opts.linkStore ? await reconcileLinks(pair, [a, b], opts.linkStore, opts) : undefined;
+  const ordinaryA = linked?.a ?? a;
+  const ordinaryB = linked?.b ?? b;
+  if (ordinaryA.some((x) => !x.source && ordinaryB.some((y) => !y.source && y.uid === x.uid)))
+    throw new Error("An original UID already exists in both calendars; adopt an existing link before syncing");
+  const actions = plan(pair, ordinaryA, ordinaryB);
   const result: PairResult = {
     pair: pair.name,
     a: a.length,
     b: b.length,
     created: 0,
-    updated: 0,
-    deleted: 0,
-    skipped: 0,
+    updated: linked?.updated ?? 0,
+    deleted: linked?.deleted ?? 0,
+    skipped: linked?.skipped ?? 0,
     errors: [],
-    warnings: [],
+    warnings: linked?.warnings ?? [],
   };
-  if (opts.dryRun) return { ...result, actions };
+  if (pair.protectInvitations && [...a, ...b].some((e) => !e.source && hasInvitations(e)))
+    result.warnings!.push(
+      "Invitation-bearing originals are protected: edits and mirror-deletion stamps are not written to them",
+    );
+  if (opts.dryRun) return { ...result, actions, ...(linked ? { linkedActions: linked.actions } : {}) };
 
   const sides = new Map([pair.a, pair.b].map((s) => [s.id, s]));
   for (const [index, act] of actions.entries()) {

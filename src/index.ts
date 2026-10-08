@@ -5,3 +5,5 @@ export * from "./ics.js";
 export * from "./caldav.js";
 export * from "./google.js";
 export { ActionObserverError, type ActionNotice, type ActionOutcome, type ActionHooks } from "./execution.js";
+
+export * from "./links.js";

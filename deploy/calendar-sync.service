@@ -1,0 +1,16 @@
+[Unit]
+Description=Personal Google and iCloud calendar synchronization
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.local/share/calendar-sync/app
+ExecStart=/usr/bin/python3 %h/.local/share/calendar-sync/app/scripts/run-local.py %h/.config/calendar-sync/config.json
+Environment=CALENDAR_SYNC_NODE=/usr/bin/node
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/calendar-sync
+TimeoutStartSec=45min

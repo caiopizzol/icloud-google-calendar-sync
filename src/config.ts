@@ -21,7 +21,14 @@ import { googleCalendarUrl, scopedAuth, type RequestOptions } from "./caldav.js"
 import { googleAccessToken, type GoogleOAuthEnv } from "./google.js";
 import type { Pair, Side } from "./sync.js";
 
-export type PairSpec = { name: string; a: string; b: string; propagateDeletes?: boolean };
+export type PairSpec = {
+  name: string;
+  a: string;
+  b: string;
+  propagateDeletes?: boolean;
+  protectInvitations?: boolean;
+  existingLinks?: boolean;
+};
 export type WindowDays = { pastDays: number; futureDays: number; allEvents?: boolean };
 
 export type DedupeConfig = {
@@ -55,14 +62,25 @@ export function parsePairSpecs(raw: unknown): PairSpec[] {
   if (!Array.isArray(v)) throw new Error("pairs must be an array");
   return v.map((p, i) => {
     if (!p || typeof p !== "object") throw new Error(`pairs[${i}] must be an object`);
-    const { name, a, b, propagateDeletes } = p as Record<string, unknown>;
+    const { name, a, b, propagateDeletes, protectInvitations, existingLinks } = p as Record<string, unknown>;
     if (typeof name !== "string" || typeof a !== "string" || typeof b !== "string") {
       throw new Error(`pairs[${i}] needs string name, a, b`);
     }
     if (propagateDeletes !== undefined && typeof propagateDeletes !== "boolean") {
       throw new Error(`pairs[${i}].propagateDeletes must be a boolean`);
     }
-    return { name, a, b, ...(propagateDeletes === undefined ? {} : { propagateDeletes }) };
+    if (protectInvitations !== undefined && typeof protectInvitations !== "boolean")
+      throw new Error(`pairs[${i}].protectInvitations must be a boolean`);
+    if (existingLinks !== undefined && typeof existingLinks !== "boolean")
+      throw new Error(`pairs[${i}].existingLinks must be a boolean`);
+    return {
+      name,
+      a,
+      b,
+      ...(existingLinks === undefined ? {} : { existingLinks }),
+      ...(propagateDeletes === undefined ? {} : { propagateDeletes }),
+      ...(protectInvitations === undefined ? {} : { protectInvitations }),
+    };
   });
 }
 
