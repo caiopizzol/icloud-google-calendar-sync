@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { fingerprint, fold, toMirror } from "../src/ics.js";
 import { parse, syncPair, type Pair, type Parsed } from "../src/sync.js";
 import { reconcileLinks, validateLinks, type LinkState, type LinkStore } from "../src/links.js";
-import { findByUid, putEvent, deleteEvent, listEvents } from "../src/caldav.js";
+import { CalDavError, findByUid, putEvent, deleteEvent, listEvents } from "../src/caldav.js";
+import { ActionObserverError } from "../src/execution.js";
 vi.mock("../src/caldav.js", async (original) => ({
   ...(await original<typeof import("../src/caldav.js")>()),
   findByUid: vi.fn(),
@@ -97,9 +98,15 @@ describe("existing links", () => {
     await expect(reconcileLinks(pair, [[event("a", "edited")], [x.b]], x.store, {})).rejects.toThrow(/verification/);
     expect(x.state().links[0].aFp).toBe(x.a.fp);
     expect(x.state().links[0].pending).toBeDefined();
-    await expect(
-      reconcileLinks(pair, [[event("a", "edited")], [event("b", "someone else's edit")]], x.store, {}),
-    ).rejects.toThrow(/uncertain linked write/);
+    const result = await reconcileLinks(
+      pair,
+      [[event("a", "edited")], [event("b", "someone else's edit")]],
+      x.store,
+      {},
+    );
+    expect(result.skipped).toBe(1);
+    expect(result.warnings).toEqual([expect.stringMatching(/uncertain linked write/)]);
+    expect(x.state().links[0].pending).toBeDefined();
   });
   it("recovers a committed PUT after a timeout without rewriting or acknowledging a later source edit", async () => {
     const x = setup();
@@ -132,12 +139,16 @@ describe("existing links", () => {
     expect((await reconcileLinks(pair, [[event("a", "edit")], [x.b]], x.store, {})).warnings).toHaveLength(1);
     expect(putEvent).not.toHaveBeenCalled();
   });
-  it("retains closed links and refuses silently restored objects", async () => {
+  it("retains closed links and holds restored objects for review", async () => {
     const x = setup();
     vi.mocked(findByUid).mockResolvedValue(null);
     await reconcileLinks(pair, [[], []], x.store, {});
     expect(x.state().links[0].closed).toBe(true);
-    expect(() => validateLinks(pair, [[x.a], []], x.state())).toThrow(/reappeared/);
+    const result = await reconcileLinks(pair, [[x.a], []], x.store, {});
+    expect(result.skipped).toBe(1);
+    expect(result.warnings).toEqual([expect.stringMatching(/reappeared/)]);
+    expect(result.a).toEqual([]);
+    expect(x.state().links[0].closed).toBe(true);
   });
   it("confirms absence and conditionally deletes an unchanged survivor", async () => {
     const x = setup();
@@ -152,9 +163,9 @@ describe("existing links", () => {
     vi.mocked(findByUid).mockRejectedValueOnce(Error("unavailable"));
     await expect(reconcileLinks(pair, [[x.a], []], x.store, {})).rejects.toThrow("unavailable");
     vi.mocked(findByUid).mockResolvedValue(null);
-    await expect(reconcileLinks(pair, [[event("a", "edited")], []], x.store, {})).rejects.toThrow(
-      /conflicts with an edit/,
-    );
+    const conflict = await reconcileLinks(pair, [[event("a", "edited")], []], x.store, {});
+    expect(conflict.skipped).toBe(1);
+    expect(conflict.warnings).toEqual([expect.stringMatching(/conflicts with an edit/)]);
     vi.mocked(findByUid).mockResolvedValueOnce(null).mockResolvedValueOnce(x.b);
     expect((await reconcileLinks(pair, [[x.a], []], x.store, { beforeAction: async () => {} })).skipped).toBe(1);
     expect(deleteEvent).not.toHaveBeenCalled();
@@ -357,5 +368,320 @@ describe("legacy zero-duration link fingerprints", () => {
     );
     expect(x.state().links[0].aFp).toBe(newer.fp);
     expect(x.state().links[0].bFp).toBe(newer.fp);
+  });
+});
+
+describe("isolated existing-link failures", () => {
+  const named = (original: Parsed, uid: string) =>
+    parse({
+      ...original,
+      href: original.href.replace("shared.ics", `${uid}.ics`),
+      ics: original.ics.replace("UID:shared", `UID:${uid}`),
+    })!;
+  const withHealthyLink = (x: ReturnType<typeof setup>) => {
+    const a = named(event("a"), "healthy");
+    const b = named(event("b"), "healthy");
+    const changed = named(event("a", "Healthy edit"), "healthy");
+    const verified = named(event("b", "Healthy edit"), "healthy");
+    x.state().links.push({ aUid: a.uid, bUid: b.uid, aFp: a.fp, bFp: b.fp });
+    vi.mocked(findByUid).mockImplementation(async (_auth, _url, uid) => (uid === "healthy" ? verified : null));
+    return { a, b, changed };
+  };
+  const expectHealthyWrite = (b: Parsed) =>
+    expect(putEvent).toHaveBeenCalledExactlyOnceWith(
+      pair.b.auth,
+      b.href,
+      expect.stringContaining("SUMMARY:Healthy edit"),
+      b.etag,
+    );
+  const setPending = (x: ReturnType<typeof setup>) => {
+    const changed = event("a", "Pending edit");
+    x.state().links[0].pending = {
+      target: "b",
+      etag: x.b.etag!,
+      sourceFp: changed.fp,
+      expectedFp: changed.fp,
+      ics: changed.ics,
+    };
+    return changed;
+  };
+
+  it.each(["review", "invitation", "disabled"] as const)(
+    "continues other links after a %s-held deletion's survivor changes",
+    async (policy) => {
+      const x = setup();
+      x.state().links[0].reviewOnChange = policy === "review";
+      const healthy = withHealthyLink(x);
+      const before = structuredClone(x.state().links[0]);
+      const survivor = event(
+        "a",
+        "New notes",
+        undefined,
+        policy === "invitation" ? ["ATTENDEE:mailto:guest@example.com"] : [],
+      );
+      const result = await reconcileLinks(
+        { ...pair, propagateDeletes: policy !== "disabled", protectInvitations: policy === "invitation" },
+        [[survivor, healthy.changed], [healthy.b]],
+        x.store,
+        {},
+      );
+      expect(result.updated).toBe(1);
+      expect(result.skipped).toBe(1);
+      expect(result.warnings).toEqual([expect.stringMatching(/held by deletion\/invitation policy/)]);
+      expect(x.state().links[0]).toEqual(before);
+      expect(deleteEvent).not.toHaveBeenCalled();
+      expectHealthyWrite(healthy.b);
+      expect(result.a).toEqual([]);
+      expect(result.b).toEqual([]);
+    },
+  );
+
+  it.each([false, true])(
+    "holds a deletion/edit conflict without blocking a healthy link (pending=%s)",
+    async (pending) => {
+      const x = setup();
+      if (pending) setPending(x);
+      const healthy = withHealthyLink(x);
+      const before = structuredClone(x.state().links[0]);
+      const result = await reconcileLinks(
+        pair,
+        [[pending ? x.a : event("a", "edited"), healthy.changed], [healthy.b]],
+        x.store,
+        {},
+      );
+      expect(result.warnings).toEqual([expect.stringMatching(/conflicts with an edit/)]);
+      expect(result.updated).toBe(1);
+      expect(result.skipped).toBe(1);
+      expect(x.state().links[0]).toEqual(before);
+      expect(deleteEvent).not.toHaveBeenCalled();
+      expectHealthyWrite(healthy.b);
+    },
+  );
+
+  it("keeps restored closed endpoints excluded while another link progresses", async () => {
+    const x = setup();
+    x.state().links[0].closed = true;
+    const healthy = withHealthyLink(x);
+    const before = structuredClone(x.state().links[0]);
+    const result = await reconcileLinks(pair, [[x.a, healthy.changed], [healthy.b]], x.store, {});
+    expect(result.warnings).toEqual([expect.stringMatching(/reappeared/)]);
+    expect(result.updated).toBe(1);
+    expect(result.skipped).toBe(1);
+    expect(result.a).toEqual([]);
+    expect(result.b).toEqual([]);
+    expect(x.state().links[0]).toEqual(before);
+    expectHealthyWrite(healthy.b);
+    expect(() => validateLinks(pair, [[x.a, x.a], []], x.state())).toThrow(/ambiguous/);
+    expect(() => validateLinks(pair, [[{ ...x.a, source: { side: "b", uid: "mirror" } }], []], x.state())).toThrow(
+      /already a mirror/,
+    );
+  });
+
+  it.each([403, 412])("clears a definitely rejected HTTP %s intent and continues other links", async (status) => {
+    const x = setup();
+    const healthy = withHealthyLink(x);
+    const before = structuredClone(x.state().links[0]);
+    const error = new CalDavError(status, "PUT", x.b.href, "");
+    vi.mocked(putEvent).mockRejectedValueOnce(error);
+    const onAction = vi.fn();
+    const result = await reconcileLinks(
+      pair,
+      [
+        [event("a", "edited"), healthy.changed],
+        [x.b, healthy.b],
+      ],
+      x.store,
+      { onAction },
+    );
+    expect(result.updated).toBe(1);
+    expect(result.skipped).toBe(1);
+    expect(result.warnings).toEqual([expect.stringContaining(String(status))]);
+    expect(x.state().links[0]).toEqual(before);
+    expect(putEvent).toHaveBeenCalledTimes(2);
+    expect(putEvent).toHaveBeenLastCalledWith(
+      pair.b.auth,
+      healthy.b.href,
+      expect.stringContaining("SUMMARY:Healthy edit"),
+      healthy.b.etag,
+    );
+    expect(onAction).toHaveBeenCalledWith(expect.objectContaining({ href: x.b.href, status: "failed" }));
+  });
+
+  it("replans a rejected 412 update with the fresh destination ETag on the next run", async () => {
+    const x = setup();
+    const changed = event("a", "edited");
+    vi.mocked(putEvent).mockRejectedValueOnce(new CalDavError(412, "PUT", x.b.href, ""));
+    await reconcileLinks(pair, [[changed], [x.b]], x.store, {});
+    expect(x.state().links[0].pending).toBeUndefined();
+    vi.mocked(findByUid).mockResolvedValue(event("b", "edited"));
+    await reconcileLinks(pair, [[changed], [{ ...x.b, etag: '"fresh"' }]], x.store, {});
+    expect(putEvent).toHaveBeenLastCalledWith(
+      pair.b.auth,
+      x.b.href,
+      expect.stringContaining("SUMMARY:edited"),
+      '"fresh"',
+    );
+    expect(x.state().links[0].aFp).toBe(changed.fp);
+    expect(x.state().links[0].bFp).toBe(changed.fp);
+  });
+
+  it("retains an older uncertain attempt when its retry is rejected, preserving a newer source edit", async () => {
+    const x = setup();
+    const copied = setPending(x);
+    const before = structuredClone(x.state().links[0]);
+    const healthy = withHealthyLink(x);
+    const newer = event("a", "Newer source", "20260103T000000Z");
+    vi.mocked(putEvent).mockRejectedValueOnce(new CalDavError(412, "PUT", x.b.href, ""));
+    const result = await reconcileLinks(
+      pair,
+      [
+        [newer, healthy.changed],
+        [x.b, healthy.b],
+      ],
+      x.store,
+      {},
+    );
+    expect(result.updated).toBe(1);
+    expect(result.warnings).toEqual([expect.stringMatching(/prior uncertain intent retained/)]);
+    expect(x.state().links[0]).toEqual(before);
+
+    const committed = event("b", "Pending edit", "20260104T000000Z");
+    expect(committed.fp).toBe(copied.fp);
+    vi.mocked(putEvent).mockClear();
+    vi.mocked(findByUid).mockResolvedValue(event("b", "Newer source"));
+    await reconcileLinks(
+      pair,
+      [
+        [newer, healthy.changed],
+        [committed, named(event("b", "Healthy edit"), "healthy")],
+      ],
+      x.store,
+      {},
+    );
+    expect(putEvent).toHaveBeenCalledExactlyOnceWith(
+      pair.b.auth,
+      x.b.href,
+      expect.stringContaining("SUMMARY:Newer source"),
+      committed.etag,
+    );
+    expect(x.state().links[0].pending).toBeUndefined();
+    expect(x.state().links[0].aFp).toBe(newer.fp);
+    expect(x.state().links[0].bFp).toBe(newer.fp);
+  });
+
+  it("clears a rejected fresh intent after recovering an earlier committed write", async () => {
+    const x = setup();
+    const copied = setPending(x);
+    const healthy = withHealthyLink(x);
+    vi.mocked(putEvent).mockRejectedValueOnce(new CalDavError(403, "PUT", x.b.href, ""));
+    const result = await reconcileLinks(
+      pair,
+      [
+        [event("a", "Newer source"), healthy.changed],
+        [event("b", "Pending edit"), healthy.b],
+      ],
+      x.store,
+      {},
+    );
+    expect(result.updated).toBe(1);
+    expect(result.warnings).toEqual([expect.stringMatching(/retry from fresh state/)]);
+    expect(x.state().links[0].pending).toBeUndefined();
+    expect(x.state().links[0].aFp).toBe(copied.fp);
+    expect(x.state().links[0].bFp).toBe(copied.fp);
+  });
+
+  it("retains conflicting uncertain intent while another link progresses", async () => {
+    const x = setup();
+    const changed = setPending(x);
+    const healthy = withHealthyLink(x);
+    const before = structuredClone(x.state().links[0]);
+    const result = await reconcileLinks(
+      pair,
+      [
+        [changed, healthy.changed],
+        [event("b", "Independent edit"), healthy.b],
+      ],
+      x.store,
+      {},
+    );
+    expect(result.warnings).toEqual([expect.stringMatching(/uncertain linked write/)]);
+    expect(result.updated).toBe(1);
+    expect(result.skipped).toBe(1);
+    expect(x.state().links[0]).toEqual(before);
+    expectHealthyWrite(healthy.b);
+  });
+
+  it.each([408, 503, "network"] as const)(
+    "preserves intent and stops on an uncertain %s PUT failure",
+    async (failure) => {
+      const x = setup();
+      const healthy = withHealthyLink(x);
+      const error = failure === "network" ? Error("network failure") : new CalDavError(failure, "PUT", x.b.href, "");
+      vi.mocked(putEvent).mockRejectedValueOnce(error);
+      await expect(
+        reconcileLinks(
+          pair,
+          [
+            [event("a", "edited"), healthy.changed],
+            [x.b, healthy.b],
+          ],
+          x.store,
+          {},
+        ),
+      ).rejects.toBe(error);
+      expect(x.state().links[0].pending).toBeDefined();
+      expect(putEvent).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(["before", "after"] as const)(
+    "preserves pending intent when the %s observer fails with a 4xx-shaped error",
+    async (phase) => {
+      const x = setup();
+      const healthy = withHealthyLink(x);
+      const error = new CalDavError(403, "PUT", x.b.href, "");
+      const fail = () => {
+        throw error;
+      };
+      if (phase === "after") vi.mocked(putEvent).mockRejectedValueOnce(error);
+      await expect(
+        reconcileLinks(
+          pair,
+          [
+            [event("a", "edited"), healthy.changed],
+            [x.b, healthy.b],
+          ],
+          x.store,
+          phase === "before" ? { beforeAction: fail } : { onAction: fail },
+        ),
+      ).rejects.toBeInstanceOf(ActionObserverError);
+      expect(x.state().links[0].pending).toBeDefined();
+      expect(putEvent).toHaveBeenCalledTimes(phase === "before" ? 0 : 1);
+    },
+  );
+
+  it("stops and retains durable pending intent when saving rejection recovery fails", async () => {
+    const x = setup();
+    const healthy = withHealthyLink(x);
+    const save = x.store.save;
+    let calls = 0;
+    x.store.save = async (state) => {
+      if (++calls === 2) throw Error("disk full");
+      await save(state);
+    };
+    vi.mocked(putEvent).mockRejectedValueOnce(new CalDavError(403, "PUT", x.b.href, ""));
+    await expect(
+      reconcileLinks(
+        pair,
+        [
+          [event("a", "edited"), healthy.changed],
+          [x.b, healthy.b],
+        ],
+        x.store,
+        {},
+      ),
+    ).rejects.toThrow("disk full");
+    expect(x.state().links[0].pending).toBeDefined();
+    expect(putEvent).toHaveBeenCalledTimes(1);
   });
 });

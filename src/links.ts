@@ -1,4 +1,4 @@
-import { deleteEvent, findByUid, putEvent } from "./caldav.js";
+import { CalDavError, deleteEvent, findByUid, putEvent } from "./caldav.js";
 import { actionNotice, performAction, type ActionNotice } from "./execution.js";
 import { fingerprint, fold, matchesFingerprint, toOriginal, unfold, uidOf } from "./ics.js";
 import { parse, type Pair, type Parsed, type SyncOptions } from "./sync.js";
@@ -51,8 +51,6 @@ export function validateLinks(pair: Pair, snapshots: [Parsed[], Parsed[]], state
       const matches = snapshots[i].filter((e) => e.uid === uid);
       if (matches.length > 1 || matches.some((e) => e.source))
         throw new Error("Existing-link endpoint is ambiguous or already a mirror");
-      if (link.closed && matches.length)
-        throw new Error("A closed existing link has reappeared; review its restoration");
       if (snapshots[1 - i].some((e) => e.source?.side === (i === 0 ? pair.a.id : pair.b.id) && e.source.uid === uid))
         throw new Error("An ordinary mirror refers to an existing-link endpoint");
     }
@@ -87,7 +85,16 @@ export async function reconcileLinks(pair: Pair, snapshots: [Parsed[], Parsed[]]
   };
   for (const link of state.links) {
     opts.signal?.throwIfAborted();
-    if (link.closed) continue;
+    let a = snapshots[0].find((e) => e.uid === link.aUid);
+    let b = snapshots[1].find((e) => e.uid === link.bUid);
+    if (link.closed) {
+      if (a || b) {
+        result.skipped++;
+        result.warnings.push("A closed existing link has reappeared; review its restoration");
+      }
+      continue;
+    }
+    const loadedPending = link.pending;
     if (link.pending) {
       // Upgrade the saved intent, never a newer source snapshot.
       const lines = unfold(link.pending.ics);
@@ -95,8 +102,6 @@ export async function reconcileLinks(pair: Pair, snapshots: [Parsed[], Parsed[]]
       if (matchesFingerprint(lines, link.pending.sourceFp)) link.pending.sourceFp = canonicalFp;
       link.pending.expectedFp = canonicalFp;
     }
-    let a = snapshots[0].find((e) => e.uid === link.aUid);
-    let b = snapshots[1].find((e) => e.uid === link.bUid);
     // Full-list snapshots are required. Confirm absence independently before deleting.
     if (!a) a = parseOrUndefined(await findByUid(pair.a.auth, pair.a.url, link.aUid));
     if (!b) b = parseOrUndefined(await findByUid(pair.b.auth, pair.b.url, link.bUid));
@@ -112,11 +117,14 @@ export async function reconcileLinks(pair: Pair, snapshots: [Parsed[], Parsed[]]
       const side = a ? pair.a : pair.b;
       const missingSide = a ? pair.b : pair.a;
       const missingUid = a ? link.bUid : link.aUid;
-      if (link.pending || !matchesFingerprint(survivor.lines, a ? link.aFp : link.bFp))
-        throw new Error("Existing-link deletion conflicts with an edit");
       if (link.reviewOnChange || !pair.propagateDeletes || (pair.protectInvitations && hasInvitations(survivor))) {
         result.skipped++;
         result.warnings.push("Existing-link deletion held by deletion/invitation policy");
+        continue;
+      }
+      if (link.pending || !matchesFingerprint(survivor.lines, a ? link.aFp : link.bFp)) {
+        result.skipped++;
+        result.warnings.push("Existing-link deletion conflicts with an edit; review before reconciling");
         continue;
       }
       const notice = actionNotice({
@@ -164,8 +172,13 @@ export async function reconcileLinks(pair: Pair, snapshots: [Parsed[], Parsed[]]
         }
         delete link.pending;
         await persist();
-      } else if (target.etag !== pending.etag)
-        throw new Error("An uncertain linked write conflicts with a new destination version");
+      } else if (target.etag !== pending.etag) {
+        result.skipped++;
+        result.warnings.push(
+          "An uncertain linked write conflicts with a new destination version; pending intent retained",
+        );
+        continue;
+      }
     }
     if (!link.pending) {
       const aChanged = !matchesFingerprint(a.lines, link.aFp);
@@ -225,7 +238,23 @@ export async function reconcileLinks(pair: Pair, snapshots: [Parsed[], Parsed[]]
       result.skipped++;
       continue;
     }
-    await performAction(notice, () => putEvent(side.auth, target.href, pending.ics, pending.etag), opts);
+    try {
+      await performAction(notice, () => putEvent(side.auth, target.href, pending.ics, pending.etag), opts);
+    } catch (error) {
+      if (!(error instanceof CalDavError) || error.status < 400 || error.status >= 500 || error.status === 408)
+        throw error;
+      // A rejected retry does not resolve an earlier attempt's uncertain outcome.
+      if (pending === loadedPending) {
+        result.skipped++;
+        result.warnings.push(`Existing-link retry rejected (HTTP ${error.status}); prior uncertain intent retained`);
+        continue;
+      }
+      delete link.pending;
+      await persist();
+      result.skipped++;
+      result.warnings.push(`Existing-link PUT rejected (HTTP ${error.status}); retry from fresh state`);
+      continue;
+    }
     result.updated++;
     const verified = parseOrUndefined(await findByUid(side.auth, side.url, target.uid));
     if (!verified || verified.fp !== pending.expectedFp)
