@@ -137,7 +137,7 @@ export function planDirection(
     const mirror = mirrors.get(uid);
     const mUid = mirrorUid(from.id, uid);
     const stamped = orig.mirroredOn.includes(to.id);
-    const protectedInvitation = opts.protectInvitations && protectedOriginal(orig, from.id);
+    const protectedInvitation = opts.protectInvitations && protectedOriginal(orig, from.id, mirror?.lines);
     if (!mirror && stamped && propagate && !protectedInvitation) {
       // The stamp says a mirror existed; it is gone → a human deleted it → delete the original too.
       actions.push({
@@ -355,7 +355,16 @@ export async function syncPair(pair: Pair, win: Window | undefined, opts: SyncOp
     [pair.a, pair.b].some(
       (side, i) =>
         side.id === "google" &&
-        [a, b][i].some((event) => !event.source && !hasInvitations(event) && protectedOriginal(event, side.id)),
+        [a, b][i].some(
+          (event) =>
+            !event.source &&
+            !hasInvitations(event) &&
+            protectedOriginal(
+              event,
+              side.id,
+              [a, b][1 - i].find((copy) => copy.source?.side === side.id && copy.source.uid === event.uid)?.lines,
+            ),
+        ),
     )
   )
     result.warnings!.push("Native Google conferences are protected: edit the original in Google");

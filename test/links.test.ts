@@ -53,6 +53,34 @@ function setup(a = event("a"), b = event("b")) {
 afterEach(() => vi.resetAllMocks());
 
 describe("existing links", () => {
+  it("holds a linked edit that would introduce a Google conference", async () => {
+    const x = setup();
+    const source = event("a", "edited", "20260102T000000Z", ["DESCRIPTION:Join https://meet.google.com/aaa-bbbb-ccc"]);
+    const guarded = { ...pair, b: { ...pair.b, id: "google" }, protectInvitations: true };
+    const result = await reconcileLinks(guarded, [[source], [x.b]], x.store, {});
+    expect(result.skipped).toBe(1);
+    expect(putEvent).not.toHaveBeenCalled();
+    expect(x.state().links[0].pending).toBeUndefined();
+  });
+
+  it("retains a pending conference introduction without retrying its native Google PUT", async () => {
+    const x = setup();
+    const source = event("a", "edited", "20260102T000000Z", ["DESCRIPTION:Join https://meet.google.com/aaa-bbbb-ccc"]);
+    const pending = {
+      target: "b" as const,
+      etag: x.b.etag!,
+      sourceFp: source.fp,
+      expectedFp: source.fp,
+      ics: source.ics,
+    };
+    x.state().links[0].pending = pending;
+    const guarded = { ...pair, b: { ...pair.b, id: "google" }, protectInvitations: true };
+    const result = await reconcileLinks(guarded, [[source], [x.b]], x.store, {});
+    expect(result.skipped).toBe(1);
+    expect(putEvent).not.toHaveBeenCalled();
+    expect(x.state().links[0].pending).toEqual(pending);
+  });
+
   it.each([false, true])(
     "adopts existing equal or divergent objects without provider writes (divergent=%s)",
     async (divergent) => {

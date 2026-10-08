@@ -92,6 +92,18 @@ describe("planDirection", () => {
     ).toBe(true);
   });
 
+  it("holds an edit that introduces a conference into a plain Google original", () => {
+    const original = ev("https://g/events/plain.ics", ics("plain", "Plain event"));
+    const copy = mirrorOf(original, google, {
+      edits: (line) =>
+        line === "END:VEVENT" ? "DESCRIPTION:Join https://meet.google.com/aaa-bbbb-ccc\r\nEND:VEVENT" : line,
+      modified: "20260909T000000Z",
+    });
+    expect(
+      planDirection(google, icloud, [original], [copy], { propagateDeletes: true, protectInvitations: true }),
+    ).toEqual([]);
+  });
+
   it("creates a mirror for a new original, with no attendees, and stamps the original", () => {
     const flight = ev("https://g/events/f.ics", ics("f", "Flight", "20260901T000000Z", ["ATTENDEE:mailto:x@y.z"]));
     const actions = planDirection(google, icloud, [flight], [], { propagateDeletes: true });

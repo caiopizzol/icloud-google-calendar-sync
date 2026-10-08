@@ -534,6 +534,8 @@ writes back to those originals and does not stamp them for mirror-deletion propa
 Changes made directly on their provider still refresh their mirrors. This avoids
 incidental invitation updates during synchronization. This protection also covers native Google
 conferences: edit those originals in Google, because a CalDAV write can change
-conference details even when it only adds a synchronization marker. Reminder-only edits are not
+conference details even when it only adds a synchronization marker. This also holds
+edits that introduce a conference into a previously plain Google original; add that
+joining link in Google instead. Reminder-only edits are not
 tracked by the event fingerprint. Simultaneous edits use a whole-event winner rather
 than combining fields. Review these limits before enabling automatic synchronization.

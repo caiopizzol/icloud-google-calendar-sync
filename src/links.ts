@@ -32,10 +32,10 @@ export type LinkStore = {
 export const hasInvitations = (event: Parsed) => event.lines.some((l) => /^(ATTENDEE|ORGANIZER)[;:]/i.test(l));
 
 /** Google CalDAV can replace conference details even on a metadata-only PUT. */
-export const protectedOriginal = (event: Parsed, side: string) =>
+export const protectedOriginal = (event: Parsed, side: string, incomingLines: string[] = []) =>
   hasInvitations(event) ||
   (side === "google" &&
-    event.lines.some(
+    [...event.lines, ...incomingLines].some(
       (line) =>
         /^(CONFERENCE|X-GOOGLE-CONFERENCE|X-RDCAL-CONFERENCEINFO|X-MICROSOFT-ONLINEMEETING[^;:]*)[;:]/i.test(line) ||
         /^(DESCRIPTION|LOCATION|URL)[;:].*https?:\/\/(?:meet\.google\.com|teams\.microsoft\.com|(?:[^/]+\.)?zoom\.us)\//i.test(
@@ -223,7 +223,10 @@ export async function reconcileLinks(pair: Pair, snapshots: [Parsed[], Parsed[]]
       const targetKey = aChanged && (!bChanged || a.modified > b.modified) ? "b" : "a";
       const source = targetKey === "b" ? a : b;
       const target = events[targetKey];
-      if (link.reviewOnChange || (pair.protectInvitations && protectedOriginal(target, pair[targetKey].id))) {
+      if (
+        link.reviewOnChange ||
+        (pair.protectInvitations && protectedOriginal(target, pair[targetKey].id, source.lines))
+      ) {
         result.skipped++;
         result.warnings.push("Existing-link edit held to protect an invitation or native Google conference");
         continue;
@@ -242,7 +245,7 @@ export async function reconcileLinks(pair: Pair, snapshots: [Parsed[], Parsed[]]
     const pending = link.pending;
     const target = events[pending.target];
     const side = pair[pending.target];
-    if (link.reviewOnChange || (pair.protectInvitations && protectedOriginal(target, side.id))) {
+    if (link.reviewOnChange || (pair.protectInvitations && protectedOriginal(target, side.id, unfold(pending.ics)))) {
       result.skipped++;
       result.warnings.push("Pending existing-link edit held by invitation policy");
       continue;
