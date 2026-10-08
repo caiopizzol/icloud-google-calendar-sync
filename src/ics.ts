@@ -211,25 +211,68 @@ const normalizeText = (v: string) =>
     .replace(/\s+/g, " ")
     .trim();
 
+type MonthlyRuleMode = "explicit" | "literal" | "implicit";
+
+function normalizeMonthlyRule(value: string, start: string, mode: MonthlyRuleMode): string {
+  if (mode === "literal") return value;
+  const date = /^(\d{4})(\d{2})(\d{2})(?:T(?:[01]\d|2[0-3])[0-5]\d(?:[0-5]\d|60)Z?)?$/.exec(propValue(start).trim());
+  if (!date) return value;
+  const day = Number(date[3]);
+  if (new Date(`${date[1]}-${date[2]}-${date[3]}T00:00:00Z`).getUTCDate() !== day) return value;
+  const parts = value.split(";");
+  const allowed: Record<string, RegExp> = {
+    FREQ: /^MONTHLY$/,
+    INTERVAL: /^[1-9]\d*$/,
+    COUNT: /^[1-9]\d*$/,
+    UNTIL: /^\d{8}(?:T\d{6}Z?)?$/,
+    WKST: /^(MO|TU|WE|TH|FR|SA|SU)$/,
+    BYMONTHDAY: /^(?:[1-9]|[12]\d|3[01])$/,
+  };
+  const seen = new Map<string, string>();
+  for (const part of parts) {
+    const [name, partValue, extra] = part.split("=");
+    if (extra !== undefined || !Object.hasOwn(allowed, name) || !allowed[name].test(partValue ?? "") || seen.has(name))
+      return value;
+    seen.set(name, partValue);
+  }
+  if (
+    seen.get("FREQ") !== "MONTHLY" ||
+    (seen.has("COUNT") && seen.has("UNTIL")) ||
+    (seen.has("BYMONTHDAY") && seen.get("BYMONTHDAY") !== String(day))
+  )
+    return value;
+  // RFC 5545 §3.3.10: missing days come from DTSTART; other BY* parts can change that expansion.
+  const implicit = parts.filter((part) => !part.startsWith("BYMONTHDAY="));
+  return mode === "implicit" ? implicit.join(";") : [...implicit, `BYMONTHDAY=${day}`].sort().join(";");
+}
+
 /** Stable fingerprint of the human-visible content of every VEVENT in the file. */
 export function fingerprint(lines: string[], legacyZeroDuration = false): string {
   return contentFingerprint(lines, legacyZeroDuration, false);
 }
 
-function contentFingerprint(lines: string[], legacyZeroDuration: boolean, legacyContentLines: boolean): string {
+function contentFingerprint(
+  lines: string[],
+  legacyZeroDuration: boolean,
+  legacyContentLines: boolean,
+  monthlyRuleMode: MonthlyRuleMode = "explicit",
+): string {
   let sig: string[] = [];
-  const components: string[][] = [];
+  let starts: string[] = [];
+  const components: { properties: string[]; starts: string[] }[] = [];
   let depth = 0; // 1 inside VEVENT, 2 inside a VALARM within it
   for (const l of lines) {
     if (l === "BEGIN:VEVENT") {
       sig = ["|"];
-      components.push(sig);
+      starts = [];
+      components.push({ properties: sig, starts });
       depth = 1;
     } else if (l === "END:VEVENT") depth = 0;
     else if (l === "BEGIN:VALARM") depth = 2;
     else if (l === "END:VALARM") depth = 1;
     else if (depth === 1 && FP_PROPS.has(propName(l))) {
       const name = propName(l);
+      if (name === "DTSTART") starts.push(l);
       if (/^(DTSTART|DTEND|RECURRENCE-ID)$/.test(name)) sig.push(normalizedDateLine(l, legacyContentLines));
       else if (name === "RDATE" || name === "EXDATE") sig.push(...normalizeRecurrenceDates(l, legacyContentLines));
       else {
@@ -239,7 +282,11 @@ function contentFingerprint(lines: string[], legacyZeroDuration: boolean, legacy
     }
   }
   const signatures = components
-    .map((properties) => {
+    .map(({ properties, starts }) => {
+      if (starts.length === 1 && properties.filter((p) => p.startsWith("RRULE=")).length === 1)
+        properties = properties.map((p) =>
+          p.startsWith("RRULE=") ? `RRULE=${normalizeMonthlyRule(p.slice(6), starts[0], monthlyRuleMode)}` : p,
+        );
       const start = properties.find((p) => p.startsWith("DTSTART="));
       if (!legacyZeroDuration && start && !start.startsWith("DTSTART=D"))
         properties = properties.filter(
@@ -252,13 +299,16 @@ function contentFingerprint(lines: string[], legacyZeroDuration: boolean, legacy
   return createHash("sha1").update(content).digest("hex").slice(0, 16);
 }
 
-/** Existing stamps and link baselines may predate parser or zero-duration corrections. */
-export const matchesFingerprint = (lines: string[], baseline: string | null): boolean =>
-  baseline !== null &&
-  (fingerprint(lines) === baseline ||
-    fingerprint(lines, true) === baseline ||
-    contentFingerprint(lines, false, true) === baseline ||
-    contentFingerprint(lines, true, true) === baseline);
+/** Existing baselines may predate parser, zero-duration, or monthly-default normalization. */
+export function matchesFingerprint(lines: string[], baseline: string | null): boolean {
+  if (baseline === null) return false;
+  for (const monthlyRuleMode of ["explicit", "literal", "implicit"] as const)
+    for (const legacyContentLines of [false, true])
+      for (const legacyZeroDuration of [false, true])
+        if (contentFingerprint(lines, legacyZeroDuration, legacyContentLines, monthlyRuleMode) === baseline)
+          return true;
+  return false;
+}
 
 // --- mirror construction ---------------------------------------------------
 

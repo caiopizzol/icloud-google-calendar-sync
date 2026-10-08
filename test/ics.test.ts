@@ -350,6 +350,136 @@ it("recognizes old quoted text and recurrence fingerprints without accepting edi
     ).toBe(false);
 });
 
+describe("monthly recurrence defaults", () => {
+  const event = (rule: string, start = "DTSTART:20260108T090000Z") => [
+    "BEGIN:VEVENT",
+    "UID:monthly",
+    `RRULE:${rule}`,
+    start,
+    "SUMMARY:Monthly",
+    "END:VEVENT",
+  ];
+
+  it.each([
+    "DTSTART:20260108T090000Z",
+    "DTSTART:20260108T090000",
+    "DTSTART;VALUE=DATE:20260108",
+    'DTSTART;TZID="GMT-03:00":20260108T230000',
+  ])("equates implicit and explicit local month-day for %s", (start) => {
+    expect(fingerprint(event("FREQ=MONTHLY", start))).toBe(fingerprint(event("FREQ=MONTHLY;BYMONTHDAY=8", start)));
+  });
+
+  it.each(["COUNT=6", "UNTIL=20261208T090000Z", "INTERVAL=2;WKST=SU"])(
+    "preserves %s while normalizing the default day and clause order",
+    (modifier) => {
+      expect(fingerprint(event(`FREQ=MONTHLY;${modifier}`))).toBe(
+        fingerprint(event(`BYMONTHDAY=8;${modifier};FREQ=MONTHLY`)),
+      );
+    },
+  );
+
+  it.each(["BYMONTHDAY=9", "BYMONTHDAY=-1", "BYMONTHDAY=8,9", "BYMONTHDAY=8;BYMONTHDAY=9"])(
+    "keeps %s distinct from the implicit monthly day",
+    (day) => {
+      expect(fingerprint(event(`FREQ=MONTHLY;${day}`))).not.toBe(fingerprint(event("FREQ=MONTHLY")));
+      expect(matchesFingerprint(event(`FREQ=MONTHLY;${day}`), fingerprint(event("FREQ=MONTHLY")))).toBe(false);
+    },
+  );
+
+  it("keeps day 31 distinct from the last day of each month", () => {
+    const start = "DTSTART;VALUE=DATE:20260131";
+    expect(fingerprint(event("FREQ=MONTHLY", start))).toBe(fingerprint(event("FREQ=MONTHLY;BYMONTHDAY=31", start)));
+    expect(fingerprint(event("FREQ=MONTHLY", start))).not.toBe(fingerprint(event("FREQ=MONTHLY;BYMONTHDAY=-1", start)));
+  });
+
+  it.each([
+    "BYDAY=MO",
+    "BYDAY=-1MO",
+    "BYDAY=MO,TU,WE,TH,FR;BYSETPOS=-1",
+    "BYSETPOS=1",
+    "BYMONTH=1,3",
+    "BYHOUR=9,10",
+    "X-UNKNOWN=1",
+    "COUNT=6;COUNT=12",
+    "COUNT=6;UNTIL=20261231T090000Z",
+  ])("does not remove a month-day constraint alongside %s", (other) => {
+    const start = "DTSTART:20260831T090000Z";
+    const implicit = event(`FREQ=MONTHLY;${other}`, start);
+    const explicit = event(`FREQ=MONTHLY;${other};BYMONTHDAY=31`, start);
+    expect(fingerprint(explicit)).not.toBe(fingerprint(implicit));
+    expect(matchesFingerprint(explicit, fingerprint(implicit))).toBe(false);
+  });
+
+  it("preserves different monthly schedules across a local month boundary", () => {
+    const local = event("FREQ=MONTHLY", 'DTSTART;TZID="GMT-03:00":20260131T230000');
+    const utc = event("FREQ=MONTHLY;BYMONTHDAY=1", "DTSTART:20260201T020000Z");
+    expect(fingerprint(local)).not.toBe(fingerprint(utc));
+    expect(fingerprint(local)).toBe(
+      fingerprint(event("FREQ=MONTHLY;BYMONTHDAY=31", 'DTSTART;TZID="GMT-03:00":20260131T230000')),
+    );
+  });
+
+  it("leaves rules with missing, invalid, or multiple DTSTART values literal", () => {
+    for (const starts of [[], ["DTSTART:20260231T090000Z"], ["DTSTART:20260108T090000Z", "DTSTART:20260109T090000Z"]]) {
+      const base = ["BEGIN:VEVENT", ...starts, "RRULE:FREQ=MONTHLY", "END:VEVENT"];
+      const explicit = base.map((line) => line.replace("FREQ=MONTHLY", "FREQ=MONTHLY;BYMONTHDAY=8"));
+      expect(fingerprint(explicit)).not.toBe(fingerprint(base));
+    }
+  });
+
+  it("accepts saved pre-normalization hashes without accepting edits", () => {
+    const implicit = event("FREQ=MONTHLY;COUNT=6");
+    const explicit = event("FREQ=MONTHLY;COUNT=6;BYMONTHDAY=8");
+    const oldImplicit = "e389bf19fefaee72";
+    const oldExplicit = "a15ba6974d1765ee";
+    expect(fingerprint(implicit)).not.toBe(oldImplicit);
+    expect(matchesFingerprint(implicit, oldImplicit)).toBe(true);
+    expect(matchesFingerprint(explicit, oldExplicit)).toBe(true);
+    expect(matchesFingerprint(explicit, oldImplicit)).toBe(true);
+    const zero = explicit.map((line) =>
+      line.replace("DTSTART:20260108T090000Z", 'DTSTART;TZID="GMT-03:00":20260108T060000'),
+    );
+    zero.splice(-1, 0, 'DTEND;TZID="GMT-03:00":20260108T060000');
+    expect(matchesFingerprint(zero, "24b367b0caffa8f6")).toBe(true);
+    for (const [before, after] of [
+      ["COUNT=6", "COUNT=7"],
+      ["BYMONTHDAY=8", "BYMONTHDAY=9"],
+      ["SUMMARY:Monthly", "SUMMARY:Edited"],
+      ["20260108T090000Z", "20260108T100000Z"],
+    ]) {
+      const edited = explicit.map((line) => line.replace(before, after));
+      expect(matchesFingerprint(edited, oldImplicit)).toBe(false);
+      expect(matchesFingerprint(edited, oldExplicit)).toBe(false);
+    }
+  });
+
+  it("normalizes the master within a recurrence set and retains exception edits", () => {
+    const master = event("FREQ=MONTHLY;COUNT=6");
+    master.splice(-1, 0, "EXDATE:20260208T090000Z", "RDATE:20260115T090000Z");
+    const exception = [
+      "BEGIN:VEVENT",
+      "UID:monthly",
+      "RECURRENCE-ID:20260308T090000Z",
+      "DTSTART:20260309T100000Z",
+      "SUMMARY:Moved occurrence",
+      "END:VEVENT",
+    ];
+    const source = [...master, ...exception];
+    const target = [
+      ...exception,
+      ...master.map((line) => line.replace("FREQ=MONTHLY;COUNT=6", "FREQ=MONTHLY;COUNT=6;BYMONTHDAY=8")),
+    ];
+    expect(fingerprint(target)).toBe(fingerprint(source));
+    for (const [before, after] of [
+      ["20260309T100000Z", "20260309T110000Z"],
+      ["20260308T090000Z", "20260408T090000Z"],
+      ["EXDATE:20260208T090000Z", "EXDATE:20260408T090000Z"],
+      ["RDATE:20260115T090000Z", "RDATE:20260116T090000Z"],
+    ])
+      expect(fingerprint(target.map((line) => line.replace(before, after)))).not.toBe(fingerprint(source));
+  });
+});
+
 it("preserves occurrence invitations when a fixed GMT timezone is rewritten as UTC", () => {
   const original = [
     "BEGIN:VEVENT",
