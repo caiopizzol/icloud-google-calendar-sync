@@ -182,6 +182,41 @@ describe("planDirection", () => {
     }
   });
 
+  it.each([
+    ['"GMT-03:00"', "68778d652c833a10"],
+    ["GMT-0300", "ec77dd98a141eff4"],
+  ])("preserves real edits on either side of an old %s fingerprint", (zone, saved) => {
+    const before = ev(
+      "https://g/events/fixed.ics",
+      fold([
+        "BEGIN:VEVENT",
+        "UID:fixed",
+        `DTSTART;TZID=${zone}:20260101T090000`,
+        `DTEND;TZID=${zone}:20260101T100000`,
+        "SUMMARY:Fixed offset",
+        "LAST-MODIFIED:20260903T000000Z",
+        "END:VEVENT",
+      ]),
+    );
+    const editedMirror = mirrorOf(before, google, {
+      fp: saved,
+      edits: (line) => line.replace("SUMMARY:Fixed offset", "SUMMARY:Mirror edit"),
+      modified: "20260902T000000Z",
+    });
+    const mirrorActions = planDirection(google, icloud, [before], [editedMirror]);
+    expect(mirrorActions.map((action) => [action.kind, action.on])).toEqual([
+      ["put", "google"],
+      ["put", "icloud"],
+    ]);
+    if (mirrorActions[0].kind === "put") expect(mirrorActions[0].ics).toContain("SUMMARY:Mirror edit");
+
+    const unchangedMirror = mirrorOf(before, google, { fp: saved, modified: "20260904T000000Z" });
+    const editedOriginal = ev(before.href, before.ics.replace("SUMMARY:Fixed offset", "SUMMARY:Original edit"));
+    const originalActions = planDirection(google, icloud, [editedOriginal], [unchangedMirror]);
+    expect(originalActions.map((action) => [action.kind, action.on])).toEqual([["put", "icloud"]]);
+    if (originalActions[0].kind === "put") expect(originalActions[0].ics).toContain("SUMMARY:Original edit");
+  });
+
   it("flags a mirror whose original is missing for orphan check, never blind delete", () => {
     const src = ev("https://g/events/f.ics", ics("f", "Flight"));
     const mirror = mirrorOf(src, google);

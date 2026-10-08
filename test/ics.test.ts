@@ -3,7 +3,10 @@ import {
   eventProp,
   fingerprint,
   fold,
+  matchesFingerprint,
   mirrorUid,
+  normalizeDateLine,
+  propValue,
   sourceRef,
   toMirror,
   toOriginal,
@@ -50,6 +53,43 @@ describe("unfold/fold", () => {
     expect(unfold(folded)[0]).toBe(long);
   });
 });
+
+it.each([
+  ['DTSTART;TZID="GMT-03:00":20260101T090000', "20260101T090000"],
+  ['ATTENDEE;CN="Team: planning; room A":mailto:team@example.com', "mailto:team@example.com"],
+  ['DESCRIPTION;ALTREP="https://example.com:8443/a":Read this: details', "Read this: details"],
+])("reads the value after quoted parameters in %s", (line, value) => {
+  expect(propValue(line)).toBe(value);
+});
+
+it.each([
+  ["GMT-0300", "2026-01-01T12:00:00Z"],
+  ['"GMT-03:00"', "2026-01-01T12:00:00Z"],
+  ["GMT+0530", "2026-01-01T03:30:00Z"],
+  ['"GMT+05:30"', "2026-01-01T03:30:00Z"],
+  ['"GMT-03:30"', "2026-01-01T12:30:00Z"],
+  ['"GMT+00:00"', "2026-01-01T09:00:00Z"],
+])("normalizes fixed offset %s", (zone, utc) => {
+  for (const property of ["DTSTART", "DTEND", "RECURRENCE-ID"])
+    expect(normalizeDateLine(`${property};TZID=${zone}:20260101T090000`)).toBe(`${property}=${Date.parse(utc)}`);
+});
+
+it("reads TZID only from its own parameter and keeps floating times distinct", () => {
+  const anchored = normalizeDateLine('DTSTART;X-NOTE="at:9;TZID=GMT+0100";TZID="GMT-03:00":20260101T090000');
+  expect(anchored).toBe(normalizeDateLine("DTSTART:20260101T120000Z"));
+  expect(normalizeDateLine('DTSTART;X-NOTE="at:9;TZID=GMT+0100":20260101T090000')).toBe(
+    normalizeDateLine("DTSTART:20260101T090000"),
+  );
+  expect(normalizeDateLine("DTSTART:20260101T090000")).not.toBe(normalizeDateLine("DTSTART:20260101T090000Z"));
+  expect(normalizeDateLine("DTSTART:20260101T090000")).not.toBe(anchored);
+});
+
+it.each(["GMT+2400", "GMT+0360", "GMT+030", "GMT-03:00-extra", "Unknown/Zone"])(
+  "preserves unsupported timezone %s as a literal",
+  (zone) => {
+    expect(normalizeDateLine(`DTSTART;TZID="${zone}":20260101T090000`)).toBe(`DTSTART=20260101T090000@${zone}`);
+  },
+);
 
 describe("toMirror", () => {
   const lines = unfold(GOOGLE_FLIGHT);
@@ -228,6 +268,103 @@ it("preserves period semantics and timezones in RDATE", () => {
   expect(fp("RDATE;VALUE=PERIOD;TZID=America/New_York:20261008T090000/PT1H")).not.toBe(
     fp("RDATE;VALUE=PERIOD;TZID=America/Los_Angeles:20261008T090000/PT1H"),
   );
+});
+
+it.each(["EXDATE", "RDATE"])("normalizes quoted GMT offsets in %s lists", (property) => {
+  const fp = (...dates: string[]) => fingerprint(["BEGIN:VEVENT", "UID:dates", ...dates, "END:VEVENT"]);
+  const local = `${property};TZID="GMT-03:00":20260102T090000,20260103T090000`;
+  const utc = [`${property}:20260103T120000Z`, `${property}:20260102T120000Z`];
+  expect(fp(local)).toBe(fp(...utc));
+  expect(fp(local)).toBe(fp(local.replace('"GMT-03:00"', "GMT-0300")));
+  expect(fp(local)).not.toBe(fp(local.replace("-03:00", "-03:30")));
+  expect(fp(local)).not.toBe(fp(local.replace("20260103T090000", "20260103T100000")));
+});
+
+it("normalizes quoted GMT offsets in RDATE periods while preserving durations", () => {
+  const fp = (date: string) => fingerprint(["BEGIN:VEVENT", "UID:period", date, "END:VEVENT"]);
+  expect(fp('RDATE;VALUE=PERIOD;TZID="GMT-03:00":20260101T090000/20260101T100000')).toBe(
+    fp("RDATE;VALUE=PERIOD:20260101T120000Z/20260101T130000Z"),
+  );
+  expect(fp('RDATE;TZID="GMT+05:30";VALUE=PERIOD:20260101T090000/PT1H')).toBe(
+    fp("RDATE;VALUE=PERIOD:20260101T033000Z/PT1H"),
+  );
+  expect(fp('RDATE;TZID="GMT+05:30";VALUE=PERIOD:20260101T090000/PT1H')).not.toBe(
+    fp('RDATE;TZID="GMT+05:30";VALUE=PERIOD:20260101T090000/PT2H'),
+  );
+});
+
+it.each([
+  ['"GMT-03:00"', "20260101T100000", "68778d652c833a10"],
+  ["GMT-0300", "20260101T100000", "ec77dd98a141eff4"],
+  ['"GMT-03:00"', "20260101T090000", "1c85d67233ce788e"],
+  ["GMT-0300", "20260101T090000", "873b54544fbc1ff0"],
+  ["GMT-0300", "20260101T090000", "a9eb6b764fa1c910"],
+])("recognizes old GMT fingerprints without accepting edits (%s, %s, %s)", (zone, end, saved) => {
+  const lines = [
+    "BEGIN:VEVENT",
+    "UID:fixed",
+    `DTSTART;TZID=${zone}:20260101T090000`,
+    `DTEND;TZID=${zone}:${end}`,
+    "SUMMARY:Fixed offset",
+    "END:VEVENT",
+  ];
+  expect(fingerprint(lines)).not.toBe(saved);
+  expect(matchesFingerprint(lines, saved)).toBe(true);
+  expect(matchesFingerprint(lines, fingerprint(lines))).toBe(true);
+  for (const [before, after] of [
+    ["SUMMARY:Fixed offset", "SUMMARY:Edited"],
+    ["20260101T090000", "20260101T090100"],
+    ["GMT-03", "GMT-04"],
+  ])
+    expect(
+      matchesFingerprint(
+        lines.map((line) => line.replace(before, after)),
+        saved,
+      ),
+    ).toBe(false);
+});
+
+it("recognizes old quoted text and recurrence fingerprints without accepting edits", () => {
+  const lines = [
+    "BEGIN:VEVENT",
+    "UID:quoted",
+    "DTSTART:20260101T120000Z",
+    'DESCRIPTION;ALTREP="https://example.com:8443/a":Read this: details',
+    'RDATE;TZID="GMT-03:00":20260102T090000,20260103T090000',
+    "END:VEVENT",
+  ];
+  const saved = "a177e2cb6dd38e2a";
+  expect(matchesFingerprint(lines, saved)).toBe(true);
+  expect(fingerprint(lines)).toBe(
+    fingerprint(lines.map((line) => line.replace(';ALTREP="https://example.com:8443/a"', ""))),
+  );
+  for (const [before, after] of [
+    ["Read this: details", "Read this: changed"],
+    ["20260103T090000", "20260103T100000"],
+  ])
+    expect(
+      matchesFingerprint(
+        lines.map((line) => line.replace(before, after)),
+        saved,
+      ),
+    ).toBe(false);
+});
+
+it("preserves occurrence invitations when a fixed GMT timezone is rewritten as UTC", () => {
+  const original = [
+    "BEGIN:VEVENT",
+    "UID:fixed",
+    'RECURRENCE-ID;TZID="GMT-03:00":20260101T090000',
+    "ATTENDEE:mailto:guest@example.com",
+    "END:VEVENT",
+  ];
+  const mirror = toMirror(original, {
+    uid: "mirror",
+    sourceSide: "a",
+    sourceUid: "fixed",
+    fp: fingerprint(original),
+  }).map((line) => (line.startsWith("RECURRENCE-ID") ? "RECURRENCE-ID:20260101T120000Z" : line));
+  expect(toOriginal(mirror, "fixed", [], original)).toContain("ATTENDEE:mailto:guest@example.com");
 });
 
 it("preserves implicit zero-duration timed events through Apple's explicit duration/end", async () => {

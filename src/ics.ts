@@ -40,7 +40,36 @@ export function fold(lines: string[]): string {
 }
 
 export const propName = (line: string): string => (/^[A-Za-z0-9-]+/.exec(line)?.[0] ?? "").toUpperCase();
-export const propValue = (line: string): string => line.slice(line.indexOf(":") + 1);
+
+function unquotedIndexOf(text: string, separator: string): number {
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '"') quoted = !quoted;
+    else if (!quoted && text[i] === separator) return i;
+  }
+  return -1;
+}
+
+function contentLine(line: string, legacy = false): { head: string; value: string } {
+  const colon = legacy ? line.indexOf(":") : unquotedIndexOf(line, ":");
+  return { head: line.slice(0, colon), value: line.slice(colon + 1) };
+}
+
+function parameterValue(head: string, name: string): string | undefined {
+  let rest = head;
+  while (rest) {
+    const semicolon = unquotedIndexOf(rest, ";");
+    const parameter = semicolon < 0 ? rest : rest.slice(0, semicolon);
+    if (parameter.toUpperCase().startsWith(`${name}=`)) {
+      return parameter.slice(name.length + 1).replace(/^"(.*)"$/, "$1");
+    }
+    if (semicolon < 0) break;
+    rest = rest.slice(semicolon + 1);
+  }
+  return undefined;
+}
+
+export const propValue = (line: string): string => contentLine(line).value;
 
 /** First VEVENT's value for a property, or null. */
 export function eventProp(lines: string[], name: string): string | null {
@@ -130,15 +159,25 @@ function zoneOffsetMin(tz: string, utcMs: number): number | null {
 
 /** DTSTART/DTEND/RECURRENCE-ID → comparable string (epoch ms, or the date, or the literal). */
 export function normalizeDateLine(line: string): string {
+  return normalizedDateLine(line, false);
+}
+
+function normalizedDateLine(line: string, legacy: boolean): string {
   const name = propName(line);
-  const value = propValue(line).trim();
-  const tz = /;TZID="?([^;:"]+)/i.exec(line)?.[1];
+  const { head, value: rawValue } = contentLine(line, legacy);
+  const value = rawValue.trim();
+  const tz = legacy ? /;TZID="?([^;:"]+)/i.exec(line)?.[1] : parameterValue(head, "TZID");
   const m = /^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})(Z?))?$/.exec(value);
-  if (!m) return `${line.slice(0, line.indexOf(":"))}=${value}`;
+  if (!m) return `${head}=${value}`;
   if (!m[4]) return `${name}=D${value}`;
   const local = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
   if (m[7] === "Z") return `${name}=${local}`;
   if (!tz) return `${name}=${local}F`;
+  const fixed = !legacy && /^GMT([+-])(\d{2}):?(\d{2})$/i.exec(tz);
+  if (fixed && +fixed[2] < 24 && +fixed[3] < 60) {
+    const offset = (+fixed[2] * 60 + +fixed[3]) * (fixed[1] === "+" ? 1 : -1);
+    return `${name}=${local - offset * 60_000}`;
+  }
   const offsets = [local - 86400000, local, local + 86400000].map((at) => zoneOffsetMin(tz, at));
   if (offsets.some((offset) => offset === null)) return `${name}=${value}@${tz}`;
   const candidates = offsets
@@ -149,23 +188,20 @@ export function normalizeDateLine(line: string): string {
 }
 
 /** Recurrence dates are sets: providers may split, reorder, or rewrite their timezones. */
-function normalizeRecurrenceDates(line: string): string[] {
-  const colon = line.indexOf(":");
-  const head = line.slice(0, colon);
+function normalizeRecurrenceDates(line: string, legacy: boolean): string[] {
+  const { head, value } = contentLine(line, legacy);
   const name = propName(line);
   const period = /;VALUE=PERIOD(?:;|$)/i.test(head);
-  return propValue(line)
-    .split(",")
-    .map((value) => {
-      if (!period) return normalizeDateLine(`${head}:${value}`);
-      const parts = value.split("/");
-      if (parts.length !== 2) return `${head}=${value}`;
-      const dateHead = head.replace(/;VALUE=PERIOD/i, "");
-      const normalized = parts.map((part) =>
-        /^[+-]?P/.test(part) ? part : normalizeDateLine(`${dateHead}:${part}`).slice(name.length + 1),
-      );
-      return `${name}=PERIOD:${normalized.join("/")}`;
-    });
+  return value.split(",").map((value) => {
+    if (!period) return normalizedDateLine(`${head}:${value}`, legacy);
+    const parts = value.split("/");
+    if (parts.length !== 2) return `${head}=${value}`;
+    const dateHead = head.replace(/;VALUE=PERIOD/i, "");
+    const normalized = parts.map((part) =>
+      /^[+-]?P/.test(part) ? part : normalizedDateLine(`${dateHead}:${part}`, legacy).slice(name.length + 1),
+    );
+    return `${name}=PERIOD:${normalized.join("/")}`;
+  });
 }
 
 const normalizeText = (v: string) =>
@@ -177,6 +213,10 @@ const normalizeText = (v: string) =>
 
 /** Stable fingerprint of the human-visible content of every VEVENT in the file. */
 export function fingerprint(lines: string[], legacyZeroDuration = false): string {
+  return contentFingerprint(lines, legacyZeroDuration, false);
+}
+
+function contentFingerprint(lines: string[], legacyZeroDuration: boolean, legacyContentLines: boolean): string {
   let sig: string[] = [];
   const components: string[][] = [];
   let depth = 0; // 1 inside VEVENT, 2 inside a VALARM within it
@@ -190,10 +230,10 @@ export function fingerprint(lines: string[], legacyZeroDuration = false): string
     else if (l === "END:VALARM") depth = 1;
     else if (depth === 1 && FP_PROPS.has(propName(l))) {
       const name = propName(l);
-      if (/^(DTSTART|DTEND|RECURRENCE-ID)$/.test(name)) sig.push(normalizeDateLine(l));
-      else if (name === "RDATE" || name === "EXDATE") sig.push(...normalizeRecurrenceDates(l));
+      if (/^(DTSTART|DTEND|RECURRENCE-ID)$/.test(name)) sig.push(normalizedDateLine(l, legacyContentLines));
+      else if (name === "RDATE" || name === "EXDATE") sig.push(...normalizeRecurrenceDates(l, legacyContentLines));
       else {
-        const value = normalizeText(propValue(l));
+        const value = normalizeText(contentLine(l, legacyContentLines).value);
         if (value && DEFAULTS[name] !== value) sig.push(`${name}=${value}`);
       }
     }
@@ -212,9 +252,13 @@ export function fingerprint(lines: string[], legacyZeroDuration = false): string
   return createHash("sha1").update(content).digest("hex").slice(0, 16);
 }
 
-/** Existing stamps and link baselines may predate zero-duration normalization. */
+/** Existing stamps and link baselines may predate parser or zero-duration corrections. */
 export const matchesFingerprint = (lines: string[], baseline: string | null): boolean =>
-  baseline !== null && (fingerprint(lines) === baseline || fingerprint(lines, true) === baseline);
+  baseline !== null &&
+  (fingerprint(lines) === baseline ||
+    fingerprint(lines, true) === baseline ||
+    contentFingerprint(lines, false, true) === baseline ||
+    contentFingerprint(lines, true, true) === baseline);
 
 // --- mirror construction ---------------------------------------------------
 
