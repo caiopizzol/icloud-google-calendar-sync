@@ -58,8 +58,10 @@ const journal = async (notice) =>
     mode: 0o600,
   });
 const reports = [];
+const signal = AbortSignal.timeout(40 * 60_000);
 try {
   for (const pair of pairs) {
+    signal.throwIfAborted();
     const storePath = join(dir, `${pair.name}.links.json`);
     const linkStore = {
       load: async () => JSON.parse(await readFile(storePath, "utf8")),
@@ -95,7 +97,7 @@ try {
       linkStore,
       googleMirrorStore,
       dryRun,
-      signal: AbortSignal.timeout(45 * 60_000),
+      signal,
       beforeAction: (notice) => journal({ phase: "before", ...notice }),
       onAction: (notice) => journal({ phase: "after", ...notice }),
     });
@@ -122,12 +124,6 @@ try {
     reports,
     runDir,
   });
-  // Retain a week of rolling recovery snapshots; the initial backup is separate.
-  for (const name of await readdir(join(dir, "runs"))) {
-    const date = Date.parse(name.replace(/T(\d\d)-(\d\d)-(\d\d)/, "T$1:$2:$3"));
-    if (Number.isFinite(date) && date < Date.now() - 7 * 86400_000)
-      await rm(join(dir, "runs", name), { recursive: true });
-  }
 } catch (error) {
   await atomicJson(join(dir, dryRun ? "last-dry-run.json" : "last-run.json"), {
     time: new Date().toISOString(),
@@ -138,4 +134,11 @@ try {
   });
   console.error("Sync stopped; inspect private last-run/run records. No retry from stale state.");
   process.exitCode = 1;
+} finally {
+  // Retain a week of rolling recovery snapshots, including after failed runs.
+  for (const name of await readdir(join(dir, "runs"))) {
+    const date = Date.parse(name.replace(/T(\d\d)-(\d\d)-(\d\d)/, "T$1:$2:$3"));
+    if (Number.isFinite(date) && date < Date.now() - 7 * 86400_000)
+      await rm(join(dir, "runs", name), { recursive: true });
+  }
 }
