@@ -148,6 +148,40 @@ describe("planDirection", () => {
     if (actions[0].kind === "put") expect(actions[0].ics).toContain("SUMMARY:source edit");
   });
 
+  it("preserves a mirror edit with an older timestamp when only the original's fingerprint format changed", () => {
+    const original = ev(
+      "https://g/events/zero.ics",
+      ics("zero", "Original", "20260903T000000Z").replace("DTEND:20260920T190000Z", "DTEND:20260920T180000Z"),
+    );
+    const mirror = mirrorOf(original, google, {
+      fp: fingerprint(original.lines, true),
+      edits: (l) => (l.startsWith("SUMMARY:") ? "SUMMARY:Mirror edit" : l),
+      modified: "20260902T000000Z",
+    });
+    const actions = planDirection(google, icloud, [original], [mirror]);
+    expect(actions.map((a) => [a.kind, a.on])).toEqual([
+      ["put", "google"],
+      ["put", "icloud"],
+    ]);
+    if (actions[0].kind === "put") expect(actions[0].ics).toContain("SUMMARY:Mirror edit");
+    if (actions[1].kind === "put") expect(actions[1].ics).toContain(`X-SYNC-FP:${mirror.fp}`);
+  });
+
+  it("preserves an original edit when an unchanged mirror has a legacy zero-duration stamp and newer timestamp", () => {
+    const before = ev(
+      "https://g/events/zero.ics",
+      ics("zero", "Original").replace("DTEND:20260920T190000Z", "DTEND:20260920T180000Z"),
+    );
+    const mirror = mirrorOf(before, google, { fp: fingerprint(before.lines, true), modified: "20260903T000000Z" });
+    const changed = ev(before.href, before.ics.replace("SUMMARY:Original", "SUMMARY:Original edit"));
+    const actions = planDirection(google, icloud, [changed], [mirror]);
+    expect(actions.map((a) => [a.kind, a.on])).toEqual([["put", "icloud"]]);
+    if (actions[0].kind === "put") {
+      expect(actions[0].ics).toContain("SUMMARY:Original edit");
+      expect(actions[0].ics).toContain(`X-SYNC-FP:${changed.fp}`);
+    }
+  });
+
   it("flags a mirror whose original is missing for orphan check, never blind delete", () => {
     const src = ev("https://g/events/f.ics", ics("f", "Flight"));
     const mirror = mirrorOf(src, google);

@@ -229,3 +229,52 @@ it("preserves period semantics and timezones in RDATE", () => {
     fp("RDATE;VALUE=PERIOD;TZID=America/Los_Angeles:20261008T090000/PT1H"),
   );
 });
+
+it("preserves implicit zero-duration timed events through Apple's explicit duration/end", async () => {
+  const { withExplicitZeroDuration } = await import("../src/ics.js");
+  const base = ["BEGIN:VEVENT", "UID:zero", "DTSTART;TZID=America/Sao_Paulo:20190807T110000", "END:VEVENT"];
+  const explicit = withExplicitZeroDuration(base);
+  expect(explicit).toContain("DURATION:PT0S");
+  expect(fingerprint(explicit)).toBe(fingerprint(base));
+  expect(fingerprint([...base.slice(0, -1), "DTEND;TZID=America/Sao_Paulo:20190807T110000", "END:VEVENT"])).toBe(
+    fingerprint(base),
+  );
+  expect(fingerprint([...base.slice(0, -1), "DTEND;TZID=America/Sao_Paulo:20190807T110100", "END:VEVENT"])).not.toBe(
+    fingerprint(base),
+  );
+  for (const invalid of ["P", "PT"])
+    expect(fingerprint([...base.slice(0, -1), `DURATION:${invalid}`, "END:VEVENT"])).not.toBe(fingerprint(base));
+  const allDay = base.map((l) => (l.startsWith("DTSTART") ? "DTSTART;VALUE=DATE:20190807" : l));
+  expect(withExplicitZeroDuration(allDay)).toEqual(allDay);
+  expect(withExplicitZeroDuration(explicit)).toEqual(explicit);
+});
+
+it("recognizes fingerprints saved before zero-duration normalization without accepting real edits", async () => {
+  const { matchesFingerprint } = await import("../src/ics.js");
+  const lines = [
+    "BEGIN:VEVENT",
+    "UID:zero",
+    "DTSTART:20261008T120000Z",
+    "DTEND:20261008T120000Z",
+    "SUMMARY:Zero",
+    "END:VEVENT",
+  ];
+  const saved = "fdcfdeb0098afe57";
+  expect(fingerprint(lines, true)).toBe(saved);
+  expect(fingerprint(lines)).not.toBe(saved);
+  expect(matchesFingerprint(lines, saved)).toBe(true);
+  expect(matchesFingerprint(lines, fingerprint(lines))).toBe(true);
+  expect(matchesFingerprint(lines, null)).toBe(false);
+  expect(
+    matchesFingerprint(
+      lines.map((l) => l.replace("SUMMARY:Zero", "SUMMARY:Edited")),
+      saved,
+    ),
+  ).toBe(false);
+  expect(
+    matchesFingerprint(
+      lines.map((l) => l.replace("DTEND:20261008T120000Z", "DTEND:20261008T130000Z")),
+      saved,
+    ),
+  ).toBe(false);
+});

@@ -206,3 +206,13 @@ it.each([false, true])("looks up the exact UID with a Google tombstone present (
     live ? googleCollection + "live.ics" : null,
   );
 });
+
+it.each([
+  collectionResponse.replace("404 Not Found", "507 Insufficient Storage"),
+  collectionResponse.replace("<c:calendar-data/>", "<c:calendar-data>incomplete</c:calendar-data>"),
+  collectionResponse.replace("/events/", "https://p45-caldav.icloud.com/events/"),
+  collectionResponse.replace("/events/", "/events"),
+])("rejects incomplete or nonmatching collection responses %#", async (xml) => {
+  const { parseEvents } = await import("../src/caldav.js");
+  expect(() => parseEvents(`<d:multistatus>${xml}</d:multistatus>`, "https://p44-caldav.icloud.com/events/")).toThrow();
+});

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fold, toMirror } from "../src/ics.js";
+import { fingerprint, fold, toMirror } from "../src/ics.js";
 import { parse, syncPair, type Pair, type Parsed } from "../src/sync.js";
 import { reconcileLinks, validateLinks, type LinkState, type LinkStore } from "../src/links.js";
 import { findByUid, putEvent, deleteEvent, listEvents } from "../src/caldav.js";
@@ -256,4 +256,106 @@ it("includes proposed linked writes in the dry-run result", async () => {
   expect(r.linkedActions).toHaveLength(1);
   expect(r.linkedActions?.[0]).toMatchObject({ operation: "update", side: "b", href: x.b.href });
   expect(putEvent).not.toHaveBeenCalled();
+});
+
+it.each([
+  { maxDeletes: 0, allowEmptyDeletes: true },
+  { maxDeletes: 10, allowEmptyDeletes: false },
+])("blocks a linked deletion discovered only after preview (%j)", async (guards) => {
+  const x = setup();
+  vi.mocked(listEvents).mockImplementation(async (_auth, url) => (url === pair.a.url ? [x.a] : []));
+  vi.mocked(findByUid).mockResolvedValueOnce(x.b).mockResolvedValue(null);
+  await expect(syncPair(pair, undefined, { linkStore: x.store, ...guards })).rejects.toThrow(/observer failed/);
+  expect(deleteEvent).not.toHaveBeenCalled();
+  expect(putEvent).not.toHaveBeenCalled();
+  expect(x.state().links[0].closed).toBeUndefined();
+});
+
+describe("legacy zero-duration link fingerprints", () => {
+  const zero = (side: "a" | "b", title = "old", modified = "20260103T000000Z", end = "DTEND:20261001T120000Z") =>
+    event(side, title, modified, [end]);
+  const legacySetup = () => {
+    const x = setup(zero("a"), zero("b"));
+    x.state().links[0].aFp = fingerprint(x.a.lines, true);
+    x.state().links[0].bFp = fingerprint(x.b.lines, true);
+    return x;
+  };
+  const addPending = (x: ReturnType<typeof setup>, copied: Parsed) => {
+    const fp = fingerprint(copied.lines, true);
+    x.state().links[0].pending = {
+      target: "b",
+      etag: x.b.etag!,
+      sourceFp: fp,
+      expectedFp: fp,
+      ics: copied.ics,
+    };
+  };
+
+  it("leaves unchanged adopted events alone, including links held for review", async () => {
+    const x = legacySetup();
+    x.state().links[0].reviewOnChange = true;
+    const result = await reconcileLinks(pair, [[x.a], [x.b]], x.store, {});
+    expect(result.actions).toEqual([]);
+    expect(result.warnings).toEqual([]);
+    expect(putEvent).not.toHaveBeenCalled();
+    expect(deleteEvent).not.toHaveBeenCalled();
+    expect(x.store.save).not.toHaveBeenCalled();
+  });
+
+  it.each(["a", "b"] as const)("propagates a single edit on %s despite its older timestamp", async (side) => {
+    const x = legacySetup();
+    const changed = zero(side, "edited", "20260102T000000Z");
+    const other = side === "a" ? "b" : "a";
+    vi.mocked(findByUid).mockResolvedValue(zero(other, "edited"));
+    await reconcileLinks(pair, side === "a" ? [[changed], [x.b]] : [[x.a], [changed]], x.store, {});
+    expect(putEvent).toHaveBeenCalledExactlyOnceWith(
+      pair[other].auth,
+      x[other].href,
+      expect.any(String),
+      x[other].etag,
+    );
+    expect(x.state().links[0].aFp).toBe(changed.fp);
+    expect(x.state().links[0].bFp).toBe(changed.fp);
+  });
+
+  it("does not mistake an unchanged survivor's legacy fingerprint for a deletion/edit conflict", async () => {
+    const x = legacySetup();
+    vi.mocked(findByUid).mockResolvedValue(null);
+    const result = await reconcileLinks(pair, [[x.a], []], x.store, {});
+    expect(result.deleted).toBe(1);
+    expect(deleteEvent).toHaveBeenCalledExactlyOnceWith(pair.a.auth, x.a.href, x.a.etag);
+  });
+
+  it.each([false, true])(
+    "recovers an old pending intent across an equivalent server representation (committed=%s)",
+    async (committed) => {
+      const x = legacySetup();
+      const copied = zero("a", "copied");
+      addPending(x, copied);
+      const stored = zero("b", "copied", undefined, "DURATION:PT0S");
+      vi.mocked(findByUid).mockResolvedValue(stored);
+      const result = await reconcileLinks(pair, [[copied], [committed ? stored : x.b]], x.store, {});
+      expect(result.updated).toBe(committed ? 0 : 1);
+      expect(putEvent).toHaveBeenCalledTimes(committed ? 0 : 1);
+      expect(x.state().links[0].pending).toBeUndefined();
+      expect(x.state().links[0].aFp).toBe(copied.fp);
+      expect(x.state().links[0].bFp).toBe(copied.fp);
+    },
+  );
+
+  it("does not acknowledge a newer source edit while upgrading a committed legacy intent", async () => {
+    const x = legacySetup();
+    addPending(x, zero("a", "copied"));
+    const newer = zero("a", "newer", "20260104T000000Z");
+    vi.mocked(findByUid).mockResolvedValue(zero("b", "newer", undefined, "DURATION:PT0S"));
+    await reconcileLinks(pair, [[newer], [zero("b", "copied", undefined, "DURATION:PT0S")]], x.store, {});
+    expect(putEvent).toHaveBeenCalledExactlyOnceWith(
+      pair.b.auth,
+      x.b.href,
+      expect.stringContaining("SUMMARY:newer"),
+      '"copied"',
+    );
+    expect(x.state().links[0].aFp).toBe(newer.fp);
+    expect(x.state().links[0].bFp).toBe(newer.fp);
+  });
 });

@@ -1,6 +1,6 @@
 import { deleteEvent, findByUid, putEvent } from "./caldav.js";
 import { actionNotice, performAction, type ActionNotice } from "./execution.js";
-import { fingerprint, fold, toOriginal, unfold, uidOf } from "./ics.js";
+import { fingerprint, fold, matchesFingerprint, toOriginal, unfold, uidOf } from "./ics.js";
 import { parse, type Pair, type Parsed, type SyncOptions } from "./sync.js";
 
 export type ExistingLink = {
@@ -63,7 +63,7 @@ export function validateLinks(pair: Pair, snapshots: [Parsed[], Parsed[]], state
         !/^[0-9a-f]{16}$/.test(link.pending.sourceFp) ||
         !/^[0-9a-f]{16}$/.test(link.pending.expectedFp) ||
         uidOf(unfold(link.pending.ics)) !== (link.pending.target === "a" ? link.aUid : link.bUid) ||
-        fingerprint(unfold(link.pending.ics)) !== link.pending.expectedFp)
+        !matchesFingerprint(unfold(link.pending.ics), link.pending.expectedFp))
     )
       throw new Error("Invalid pending existing-link operation");
   }
@@ -88,6 +88,13 @@ export async function reconcileLinks(pair: Pair, snapshots: [Parsed[], Parsed[]]
   for (const link of state.links) {
     opts.signal?.throwIfAborted();
     if (link.closed) continue;
+    if (link.pending) {
+      // Upgrade the saved intent, never a newer source snapshot.
+      const lines = unfold(link.pending.ics);
+      const canonicalFp = fingerprint(lines);
+      if (matchesFingerprint(lines, link.pending.sourceFp)) link.pending.sourceFp = canonicalFp;
+      link.pending.expectedFp = canonicalFp;
+    }
     let a = snapshots[0].find((e) => e.uid === link.aUid);
     let b = snapshots[1].find((e) => e.uid === link.bUid);
     // Full-list snapshots are required. Confirm absence independently before deleting.
@@ -105,7 +112,7 @@ export async function reconcileLinks(pair: Pair, snapshots: [Parsed[], Parsed[]]
       const side = a ? pair.a : pair.b;
       const missingSide = a ? pair.b : pair.a;
       const missingUid = a ? link.bUid : link.aUid;
-      if (link.pending || survivor.fp !== (a ? link.aFp : link.bFp))
+      if (link.pending || !matchesFingerprint(survivor.lines, a ? link.aFp : link.bFp))
         throw new Error("Existing-link deletion conflicts with an edit");
       if (link.reviewOnChange || !pair.propagateDeletes || (pair.protectInvitations && hasInvitations(survivor))) {
         result.skipped++;
@@ -161,8 +168,8 @@ export async function reconcileLinks(pair: Pair, snapshots: [Parsed[], Parsed[]]
         throw new Error("An uncertain linked write conflicts with a new destination version");
     }
     if (!link.pending) {
-      const aChanged = a.fp !== link.aFp;
-      const bChanged = b.fp !== link.bFp;
+      const aChanged = !matchesFingerprint(a.lines, link.aFp);
+      const bChanged = !matchesFingerprint(b.lines, link.bFp);
       if (!aChanged && !bChanged) continue;
       if (a.fp === b.fp) {
         link.aFp = a.fp;

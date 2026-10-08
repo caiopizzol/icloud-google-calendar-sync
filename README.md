@@ -508,6 +508,12 @@ ordinary CLI and HTTP handler cannot supply this private filesystem state. Use
 `--dry` with the guarded runner to inspect both mirror and linked actions. Sample
 systemd user units are in `deploy/`; install only one active runner.
 
+By default, `syncPair` refuses deletions when either full calendar snapshot is empty
+and stops plans exceeding ten deletions per pair. The limit also applies during
+execution if provider state changes after the preview. Dry runs remain available for
+inspection. Library callers can explicitly set `maxDeletes` or `allowEmptyDeletes`
+after reviewing the state; the guarded runner keeps the defaults.
+
 `protectInvitations` allows invitation-bearing originals to be copied out, but holds
 writes back to those originals and does not stamp them for mirror-deletion propagation.
 Changes made directly on their provider still refresh their mirrors. This avoids

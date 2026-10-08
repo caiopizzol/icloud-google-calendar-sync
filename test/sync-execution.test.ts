@@ -177,7 +177,7 @@ describe("sync execution", () => {
     events.set(src.href, src);
     expect((await syncPair(pair, win)).errors).toEqual([]);
     events.delete(pair.b.url + mirrorUid(pair.a.id, "example") + ".ics");
-    const result = await syncPair(pair, win);
+    const result = await syncPair(pair, win, { allowEmptyDeletes: true });
     expect(result.deleted).toBe(1);
     expect(events.size).toBe(0);
     expect(dav.findByUid).toHaveBeenCalledWith(pair.b.auth, pair.b.url, mirrorUid(pair.a.id, "example"));
@@ -189,7 +189,7 @@ describe("sync execution", () => {
     await syncPair(pair, win);
     events.delete(pair.b.url + mirrorUid(pair.a.id, "example") + ".ics");
     dav.findByUid.mockRejectedValueOnce(new Error("503 unavailable"));
-    expect((await syncPair(pair, win)).errors).toHaveLength(1);
+    expect((await syncPair(pair, win, { allowEmptyDeletes: true })).errors).toHaveLength(1);
     expect(events.has(src.href)).toBe(true);
     expect(dav.deleteEvent).not.toHaveBeenCalled();
   });
@@ -330,6 +330,7 @@ it("skips a deletion if the missing counterpart reappears during its before hook
   events.delete(mirrorHref);
   const onAction = vi.fn();
   const result = await syncPair(pair, win, {
+    allowEmptyDeletes: true,
     beforeAction: () => {
       events.set(mirrorHref, mirror);
     },
@@ -339,4 +340,42 @@ it("skips a deletion if the missing counterpart reappears during its before hook
   expect(result.skipped).toBe(1);
   expect(events.has(src.href)).toBe(true);
   expect(onAction).toHaveBeenCalledWith(expect.objectContaining({ operation: "delete", status: "skipped" }));
+});
+
+it("holds deletion when one provider reports an empty calendar, preventing a later cascade", async () => {
+  const src = original(pair.a.url + "example.ics");
+  events.set(src.href, src);
+  await syncPair(pair, win);
+  const before = new Map(events);
+  dav.listEvents.mockImplementation(async (_auth, url: string) =>
+    url === pair.b.url ? [] : [...events.values()].filter((e) => e.href.startsWith(url)),
+  );
+  dav.findByUid.mockResolvedValue(null);
+  await expect(syncPair(pair, win)).rejects.toThrow(/calendar is empty/);
+  expect(events).toEqual(before);
+  expect(dav.deleteEvent).not.toHaveBeenCalled();
+  dav.listEvents.mockImplementation(async (_auth, url: string) =>
+    [...events.values()].filter((e) => e.href.startsWith(url)),
+  );
+  expect((await syncPair(pair, win)).deleted).toBe(0);
+  expect(events).toEqual(before);
+});
+it("holds a large deletion plan before making any write, while keeping the dry run inspectable", async () => {
+  const src = original(pair.a.url + "keep.ics");
+  events.set(src.href, src);
+  for (let i = 0; i < 11; i++) {
+    const lines = unfold(original(pair.a.url + "x.ics").ics).map((l) => (l === "UID:example" ? `UID:orphan-${i}` : l));
+    const parsed = parse({ href: "https://x/", etag: '"1"', ics: fold(lines) })!;
+    const uid = mirrorUid("google", parsed.uid);
+    const href = pair.b.url + uid + ".ics";
+    events.set(href, {
+      href,
+      etag: '"1"',
+      ics: fold(toMirror(lines, { uid, sourceSide: "google", sourceUid: parsed.uid, fp: parsed.fp })),
+    });
+  }
+  expect((await syncPair(pair, win, { dryRun: true })).actions?.filter((a) => a.kind !== "put")).toHaveLength(11);
+  await expect(syncPair(pair, win)).rejects.toThrow(/Deletion limit exceeded/);
+  expect(dav.putEvent).not.toHaveBeenCalled();
+  expect(dav.deleteEvent).not.toHaveBeenCalled();
 });

@@ -2,7 +2,7 @@
 // an app-specific password; Google's CalDAV v2 uses Bearer. Responses are
 // fixed shapes, picked apart with regexes (no DOM parser in most runtimes).
 
-import { uidOf, unfold } from "./ics.js";
+import { uidOf, unfold, fold, withExplicitZeroDuration } from "./ics.js";
 
 export type RequestOptions = {
   signal?: AbortSignal;
@@ -305,7 +305,8 @@ export async function putEvent(auth: CalDavAuth, href: string, ics: string, etag
     "Content-Type": "text/calendar; charset=utf-8",
     ...(etag ? { "If-Match": etag } : { "If-None-Match": "*" }),
   };
-  await dav(auth, "PUT", href, { body: ics, headers });
+  const body = providerUrlPolicy("icloud")(new URL(href)) ? fold(withExplicitZeroDuration(unfold(ics))) : ics;
+  await dav(auth, "PUT", href, { body, headers });
 }
 
 export async function deleteEvent(auth: CalDavAuth, href: string, etag: string | null): Promise<void> {

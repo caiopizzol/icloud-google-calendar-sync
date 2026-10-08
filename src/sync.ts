@@ -17,6 +17,7 @@ import {
   fingerprint,
   fold,
   lastModifiedMs,
+  matchesFingerprint,
   mirroredOn,
   mirrorUid,
   sourceRef,
@@ -30,7 +31,8 @@ import {
 
 import { actionNotice, performAction, ActionObserverError, type ActionHooks, type ActionNotice } from "./execution.js";
 
-export type SyncOptions = RequestOptions & ActionHooks & { dryRun?: boolean; linkStore?: LinkStore };
+export type SyncOptions = RequestOptions &
+  ActionHooks & { dryRun?: boolean; linkStore?: LinkStore; maxDeletes?: number; allowEmptyDeletes?: boolean };
 
 export type Side = { id: string; auth: CalDavAuth; url: string };
 export type Pair = {
@@ -149,8 +151,8 @@ export function planDirection(
     const mirrorEdited =
       mirror &&
       orig.fp !== mirror.fp &&
-      mirror.fp !== mirror.fpAtCopy &&
-      (orig.fp === mirror.fpAtCopy || mirror.modified > orig.modified);
+      !matchesFingerprint(mirror.lines, mirror.fpAtCopy) &&
+      (matchesFingerprint(orig.lines, mirror.fpAtCopy) || mirror.modified > orig.modified);
     if (propagate && !stamped && !mirrorEdited && !protectedInvitation) {
       actions.push({
         ...put(from.id, orig, withMirrored(orig.lines, to.id), `stamp ${uid} as mirrored on ${to.id}`),
@@ -266,12 +268,41 @@ export async function syncPair(pair: Pair, win: Window | undefined, opts: SyncOp
     }
   }
   if (opts.linkStore && win) throw new Error("Existing links require all-history synchronization");
-  const linked = opts.linkStore ? await reconcileLinks(pair, [a, b], opts.linkStore, opts) : undefined;
-  const ordinaryA = linked?.a ?? a;
-  const ordinaryB = linked?.b ?? b;
+  const previewLinked = opts.linkStore
+    ? await reconcileLinks(pair, [a, b], opts.linkStore, { ...opts, dryRun: true })
+    : undefined;
+  const ordinaryA = previewLinked?.a ?? a;
+  const ordinaryB = previewLinked?.b ?? b;
   if (ordinaryA.some((x) => !x.source && ordinaryB.some((y) => !y.source && y.uid === x.uid)))
     throw new Error("An original UID already exists in both calendars; adopt an existing link before syncing");
   const actions = plan(pair, ordinaryA, ordinaryB);
+  const deleteCount =
+    actions.filter((action) => action.kind !== "put").length +
+    (previewLinked?.actions.filter((action) => action.operation === "delete").length ?? 0);
+  const maxDeletes = opts.maxDeletes ?? 10;
+  if (!Number.isInteger(maxDeletes) || maxDeletes < 0) throw new Error("maxDeletes must be a nonnegative integer");
+  if (!opts.dryRun && deleteCount > maxDeletes)
+    throw new Error(`Deletion limit exceeded: ${deleteCount} proposed, limit ${maxDeletes}`);
+  if (!opts.dryRun && deleteCount && (!a.length || !b.length) && opts.allowEmptyDeletes !== true)
+    throw new Error("Refusing deletions while a calendar is empty; inspect a dry run before explicitly overriding");
+  let attemptedDeletes = 0;
+  const beforeAction = opts.beforeAction;
+  opts = {
+    ...opts,
+    beforeAction: async (notice) => {
+      if (notice.operation === "delete") {
+        if ((!a.length || !b.length) && opts.allowEmptyDeletes !== true)
+          throw new Error("Refusing deletions while a calendar is empty");
+        if (++attemptedDeletes > maxDeletes) throw new Error("Deletion limit exceeded during execution");
+      }
+      await beforeAction?.(notice);
+    },
+  };
+  const linked = opts.dryRun
+    ? previewLinked
+    : opts.linkStore
+      ? await reconcileLinks(pair, [a, b], opts.linkStore, opts)
+      : undefined;
   const result: PairResult = {
     pair: pair.name,
     a: a.length,

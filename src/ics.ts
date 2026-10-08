@@ -176,7 +176,7 @@ const normalizeText = (v: string) =>
     .trim();
 
 /** Stable fingerprint of the human-visible content of every VEVENT in the file. */
-export function fingerprint(lines: string[]): string {
+export function fingerprint(lines: string[], legacyZeroDuration = false): string {
   let sig: string[] = [];
   const components: string[][] = [];
   let depth = 0; // 1 inside VEVENT, 2 inside a VALARM within it
@@ -198,10 +198,23 @@ export function fingerprint(lines: string[]): string {
       }
     }
   }
-  const signatures = components.map((properties) => properties.sort().join("\n")).sort();
+  const signatures = components
+    .map((properties) => {
+      const start = properties.find((p) => p.startsWith("DTSTART="));
+      if (!legacyZeroDuration && start && !start.startsWith("DTSTART=D"))
+        properties = properties.filter(
+          (p) => p !== `DTEND=${start.slice(8)}` && !/^DURATION=P(?=.*0)(?:0[WD])?(?:T(?:0H)?(?:0M)?(?:0S)?)?$/.test(p),
+        );
+      return properties.sort().join("\n");
+    })
+    .sort();
   const content = signatures.length <= 1 ? (signatures[0] ?? "") : JSON.stringify(signatures);
   return createHash("sha1").update(content).digest("hex").slice(0, 16);
 }
+
+/** Existing stamps and link baselines may predate zero-duration normalization. */
+export const matchesFingerprint = (lines: string[], baseline: string | null): boolean =>
+  baseline !== null && (fingerprint(lines) === baseline || fingerprint(lines, true) === baseline);
 
 // --- mirror construction ---------------------------------------------------
 
@@ -270,3 +283,28 @@ export const withMirrored = (original: string[], side: string) =>
 /** Deterministic mirror UID so a re-run never creates a second copy. */
 export const mirrorUid = (sourceSide: string, sourceUid: string) =>
   `${sourceUid.replace(/[^A-Za-z0-9@._-]/g, "_")}-mirror-${sourceSide}`;
+
+/** Apple requires an explicit end/duration for a timed event with its implicit zero duration. */
+export function withExplicitZeroDuration(lines: string[]): string[] {
+  const result: string[] = [];
+  let depth = 0;
+  let timed = false;
+  let hasEnd = false;
+  for (const line of lines) {
+    if (line === "BEGIN:VEVENT") {
+      depth = 1;
+      timed = false;
+      hasEnd = false;
+    } else if (depth && line.startsWith("BEGIN:")) depth++;
+    else if (line === "END:VEVENT") {
+      if (timed && !hasEnd) result.push("DURATION:PT0S");
+      depth = 0;
+    } else if (depth && line.startsWith("END:")) depth--;
+    else if (depth === 1) {
+      if (propName(line) === "DTSTART") timed = /T\d{6}Z?$/.test(propValue(line));
+      if (["DTEND", "DURATION"].includes(propName(line))) hasEnd = true;
+    }
+    result.push(line);
+  }
+  return result;
+}
