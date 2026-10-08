@@ -470,3 +470,16 @@ event produces a new key. Only probabilities are stored; the current threshold i
 applied on read. Store errors and invalid stored values count as cache misses.
 Unavailable results are never stored. Old keys are never deleted; prune the table
 if it matters. Keep caller-side scanning bounded when comparing calendars.
+
+### Complete history
+
+Set `"window": { "allEvents": true }` in the configuration to synchronize all
+stored event resources, including old events and recurring series with no end date.
+This omits the CalDAV time filter; it does not expand infinite recurrences. The HTTP
+response reports `window: null`. Without this option, the existing `pastDays` and
+`futureDays` defaults apply. Duplicate occurrence review still uses those bounded
+day settings.
+
+Use distinct calendars for every pair. Never reuse a destination calendar in multiple
+pairs. With a finite window, edits that move a linked event outside the window may
+leave its counterpart stale; use `allEvents` for complete two-way reconciliation.

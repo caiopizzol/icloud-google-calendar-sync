@@ -73,7 +73,7 @@ export function createHandler({
     const selected = only ? pairs.filter((p) => p.name === only) : pairs;
     if (!selected.length) return json({ error: "no calendar pairs configured" }, 400);
 
-    const win = window(config.window.pastDays, config.window.futureDays);
+    const win = config.window.allEvents ? undefined : window(config.window.pastDays, config.window.futureDays);
     const results: PairResult[] = [];
     for (const pair of selected) {
       try {
@@ -111,7 +111,7 @@ export function createHandler({
       {
         ok: !failed,
         dryRun,
-        window: { start: win.start.toISOString(), end: win.end.toISOString() },
+        window: win ? { start: win.start.toISOString(), end: win.end.toISOString() } : null,
         results,
         ...(consolidation ? { consolidation } : {}),
       },

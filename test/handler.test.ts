@@ -209,3 +209,13 @@ describe("opt-in consolidation", () => {
     expect((await run(request())).status).toBe(200);
   });
 });
+
+it("uses an unfiltered sync when allEvents is configured", async () => {
+  syncPair.mockResolvedValue({ errors: [] });
+  const handler = createHandler({
+    config: { ...config, window: { ...config.window, allEvents: true } },
+    secret: "shh",
+  });
+  expect((await handler(new Request("http://h/", { headers: { "x-api-key": "shh" } }))).status).toBe(200);
+  expect(syncPair.mock.calls[0][1]).toBeUndefined();
+});

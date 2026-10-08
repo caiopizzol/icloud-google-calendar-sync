@@ -143,7 +143,7 @@ async function sync(config: Config): Promise<void> {
   const only = flag("--pair");
   const pairs = pairsFor(config).filter((p) => !only || p.name === only);
   if (!pairs.length) throw new Error("no pairs configured" + (only ? ` named ${only}` : ""));
-  const win = window(config.window.pastDays, config.window.futureDays);
+  const win = config.window.allEvents ? undefined : window(config.window.pastDays, config.window.futureDays);
   let failed = false;
   for (const pair of pairs) {
     const r = await syncPair(pair, win, { dryRun });

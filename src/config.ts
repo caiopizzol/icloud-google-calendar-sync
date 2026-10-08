@@ -22,7 +22,7 @@ import { googleAccessToken, type GoogleOAuthEnv } from "./google.js";
 import type { Pair, Side } from "./sync.js";
 
 export type PairSpec = { name: string; a: string; b: string; propagateDeletes?: boolean };
-export type WindowDays = { pastDays: number; futureDays: number };
+export type WindowDays = { pastDays: number; futureDays: number; allEvents?: boolean };
 
 export type DedupeConfig = {
   provider: "gateway" | "typesafe";
@@ -86,7 +86,10 @@ export function loadConfig(file: Record<string, unknown> | null, env: Env = proc
 
   const pairs = parsePairSpecs(file?.pairs ?? env.CALENDAR_PAIRS);
   const w = (file?.window ?? {}) as Record<string, unknown>;
+  if (w.allEvents !== undefined && typeof w.allEvents !== "boolean")
+    throw new Error("window.allEvents must be a boolean");
   const window = {
+    ...(w.allEvents === undefined ? {} : { allEvents: w.allEvents }),
     pastDays: num(w.pastDays ?? env.CALENDAR_SYNC_PAST_DAYS, 30, 0),
     futureDays: num(w.futureDays ?? env.CALENDAR_SYNC_FUTURE_DAYS, 365, 1),
   };

@@ -134,7 +134,7 @@ export function normalizeDateLine(line: string): string {
   const value = propValue(line).trim();
   const tz = /;TZID="?([^;:"]+)/i.exec(line)?.[1];
   const m = /^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})(Z?))?$/.exec(value);
-  if (!m) return `${name}=${value}`;
+  if (!m) return `${line.slice(0, line.indexOf(":"))}=${value}`;
   if (!m[4]) return `${name}=D${value}`;
   const local = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
   if (m[7] === "Z") return `${name}=${local}`;
@@ -146,6 +146,26 @@ export function normalizeDateLine(line: string): string {
     .filter((at) => at + zoneOffsetMin(tz, at)! * 60_000 === local);
   // RFC 5545: first occurrence of an ambiguous time; pre-gap offset for a nonexistent time.
   return `${name}=${candidates.length ? Math.min(...candidates) : local - offsets[0]! * 60_000}`;
+}
+
+/** Recurrence dates are sets: providers may split, reorder, or rewrite their timezones. */
+function normalizeRecurrenceDates(line: string): string[] {
+  const colon = line.indexOf(":");
+  const head = line.slice(0, colon);
+  const name = propName(line);
+  const period = /;VALUE=PERIOD(?:;|$)/i.test(head);
+  return propValue(line)
+    .split(",")
+    .map((value) => {
+      if (!period) return normalizeDateLine(`${head}:${value}`);
+      const parts = value.split("/");
+      if (parts.length !== 2) return `${head}=${value}`;
+      const dateHead = head.replace(/;VALUE=PERIOD/i, "");
+      const normalized = parts.map((part) =>
+        /^[+-]?P/.test(part) ? part : normalizeDateLine(`${dateHead}:${part}`).slice(name.length + 1),
+      );
+      return `${name}=PERIOD:${normalized.join("/")}`;
+    });
 }
 
 const normalizeText = (v: string) =>
@@ -171,6 +191,7 @@ export function fingerprint(lines: string[]): string {
     else if (depth === 1 && FP_PROPS.has(propName(l))) {
       const name = propName(l);
       if (/^(DTSTART|DTEND|RECURRENCE-ID)$/.test(name)) sig.push(normalizeDateLine(l));
+      else if (name === "RDATE" || name === "EXDATE") sig.push(...normalizeRecurrenceDates(l));
       else {
         const value = normalizeText(propValue(l));
         if (value && DEFAULTS[name] !== value) sig.push(`${name}=${value}`);

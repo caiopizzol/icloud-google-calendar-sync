@@ -222,7 +222,7 @@ export const window = (pastDays: number, futureDays: number, now = new Date()): 
   end: new Date(now.getTime() + futureDays * 86400_000),
 });
 
-export async function syncPair(pair: Pair, win: Window, opts: SyncOptions = {}): Promise<PairResult> {
+export async function syncPair(pair: Pair, win: Window | undefined, opts: SyncOptions = {}): Promise<PairResult> {
   opts.signal?.throwIfAborted();
   pair = {
     ...pair,

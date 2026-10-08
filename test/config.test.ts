@@ -84,3 +84,10 @@ describe("delete propagation config", () => {
     ).toThrow(/propagateDeletes/);
   });
 });
+
+it("accepts true or false for complete-history synchronization and rejects ambiguous values", () => {
+  for (const allEvents of [true, false])
+    expect(loadConfig({ window: { allEvents } }, {}).window.allEvents).toBe(allEvents);
+  for (const allEvents of ["true", 1, null])
+    expect(() => loadConfig({ window: { allEvents } }, {})).toThrow(/allEvents/);
+});

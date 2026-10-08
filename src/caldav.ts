@@ -190,9 +190,9 @@ async function query(auth: CalDavAuth, calendar: string, filter: string, expand 
 
 const stamp = (d: Date) => d.toISOString().replace(/[-:]|\.\d{3}/g, "");
 
-/** Every VEVENT resource overlapping [start, end). */
-export const listEvents = (auth: CalDavAuth, calendar: string, range: { start: Date; end: Date }) =>
-  query(auth, calendar, `<c:time-range start="${stamp(range.start)}" end="${stamp(range.end)}"/>`);
+/** Every VEVENT resource; optionally restricted to those overlapping [start, end). */
+export const listEvents = (auth: CalDavAuth, calendar: string, range?: { start: Date; end: Date }) =>
+  query(auth, calendar, range ? `<c:time-range start="${stamp(range.start)}" end="${stamp(range.end)}"/>` : "");
 
 /** Read-only expanded occurrences for duplicate review, never for mirror writes. */
 export const listOccurrences = (auth: CalDavAuth, calendar: string, range: { start: Date; end: Date }) =>
@@ -209,9 +209,50 @@ export const findByUid = async (auth: CalDavAuth, calendar: string, uid: string)
     await query(
       auth,
       calendar,
-      `<c:prop-filter name="UID"><c:text-match collation="i;octet">${escapeXml(uid)}</c:text-match></c:prop-filter>`,
+      providerUrlPolicy("icloud")(new URL(calendar))
+        ? ""
+        : `<c:prop-filter name="UID"><c:text-match collation="i;octet">${escapeXml(uid)}</c:text-match></c:prop-filter>`,
     )
   ).find((event) => uidOf(unfold(event.ics)) === uid) ?? null;
+
+function collectionWithoutEventData(response: string): boolean {
+  const propstats = [...response.matchAll(/<(?:[\w-]+:)?propstat(?:\s[^>]*)?>([\s\S]*?)<\/(?:[\w-]+:)?propstat>/gi)];
+  const statuses = propstats.map(([, propstat]) => /\s(\d{3})\b/.exec(tag(propstat, "status") ?? "")?.[1]);
+  return (
+    [...response.matchAll(/<(?:[\w-]+:)?status(?:\s|>)/g)].length === propstats.length &&
+    tag(response, "getetag") !== null &&
+    statuses.includes("200") &&
+    statuses.includes("404") &&
+    propstats.every(([, propstat], i) =>
+      statuses[i] === "200"
+        ? true
+        : statuses[i] === "404" &&
+          /^<(?:[\w-]+:)?calendar-data(?:\s[^>]*)?\s*\/>$/.test((tag(propstat, "prop") ?? "").trim()),
+    )
+  );
+}
+
+function timezoneOnlyCalendar(lines: string[]): boolean {
+  if (lines[0] !== "BEGIN:VCALENDAR" || lines.at(-1) !== "END:VCALENDAR") return false;
+  const stack: string[] = [];
+  for (const [index, line] of lines.entries()) {
+    const upper = line.toUpperCase();
+    if (upper.startsWith("BEGIN:")) {
+      const component = upper.slice(6);
+      const parent = stack.at(-1);
+      const allowed =
+        (index === 0 && component === "VCALENDAR") ||
+        (parent === "VCALENDAR" && component === "VTIMEZONE") ||
+        (parent === "VTIMEZONE" && (component === "STANDARD" || component === "DAYLIGHT"));
+      if (!allowed) return false;
+      stack.push(component);
+    } else if (upper.startsWith("END:")) {
+      if (stack.pop() !== upper.slice(4)) return false;
+      if (!stack.length && index !== lines.length - 1) return false;
+    } else if (!stack.length || !line.includes(":")) return false;
+  }
+  return stack.length === 0;
+}
 
 export function parseEvents(multistatus: string, base: string): CalDavEvent[] {
   if (
@@ -227,19 +268,32 @@ export function parseEvents(multistatus: string, base: string): CalDavEvent[] {
   if (!entries.length && content?.trim()) throw new Error("Unexpected CalDAV multistatus content");
   return entries.flatMap((r) => {
     const statuses = [...r.matchAll(/<(?:[\w-]+:)?status[^>]*>[^<]*?\s(\d{3})\b/gi)];
-    if (statuses.some((s) => Number(s[1]) >= 400)) throw new Error("CalDAV query contains failed resource properties");
     const href = tag(r, "href");
     const data = tag(r, "calendar-data");
-    if (!href || data == null) throw new Error("CalDAV query is missing resource data");
+    if (!href) throw new Error("CalDAV query is missing resource data");
     const resolved = resolveHref(base, href);
     const collection = new URL(base);
     const resource = new URL(resolved);
+    // iCloud reports calendar-data as missing on the collection itself.
+    if (resource.href === collection.href && data == null && collectionWithoutEventData(r)) return [];
+    if (statuses.some((s) => Number(s[1]) >= 400)) throw new Error("CalDAV query contains failed resource properties");
+    if (data == null) throw new Error("CalDAV query is missing resource data");
     if (
       resource.origin !== collection.origin ||
       !resource.pathname.startsWith(collection.pathname.endsWith("/") ? collection.pathname : collection.pathname + "/")
     )
       throw new Error("CalDAV event is outside the requested collection");
-    if (!uidOf(unfold(xmlText(data)))) throw new Error("CalDAV query contains invalid event data");
+    const lines = unfold(xmlText(data));
+    if (!uidOf(lines)) {
+      // Google can return a timezone-only calendar for a cancelled series.
+      const successfulData = [
+        ...r.matchAll(/<(?:[\w-]+:)?propstat(?:\s[^>]*)?>([\s\S]*?)<\/(?:[\w-]+:)?propstat>/gi),
+      ].some(
+        ([, propstat]) => tag(propstat, "calendar-data") !== null && /\s200\b/.test(tag(propstat, "status") ?? ""),
+      );
+      if (providerUrlPolicy("google")(collection) && successfulData && timezoneOnlyCalendar(lines)) return [];
+      throw new Error("CalDAV query contains invalid event data");
+    }
     const etag = tag(r, "getetag");
     return [{ href: resolved, etag: etag ? xmlText(etag).trim() : null, ics: xmlText(data) }];
   });

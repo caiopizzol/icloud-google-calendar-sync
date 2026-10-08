@@ -206,3 +206,26 @@ it.each([
   const { normalizeDateLine } = await import("../src/ics.js");
   expect(normalizeDateLine(`DTSTART;TZID=America/Chicago:${local}`)).toBe(`DTSTART=${Date.parse(utc)}`);
 });
+
+it.each(["EXDATE", "RDATE"])("detects %s timezone edits and ignores equivalent list formatting", (property) => {
+  const fp = (...dates: string[]) =>
+    fingerprint(["BEGIN:VEVENT", "UID:dates", "DTSTART:20261001T130000Z", ...dates, "END:VEVENT"]);
+  const ny = `${property};TZID=America/New_York:20261008T090000,20261009T090000`;
+  expect(fp(ny)).not.toBe(fp(ny.replace("New_York", "Los_Angeles")));
+  expect(fp(ny)).toBe(fp(`${property}:20261009T130000Z`, `${property}:20261008T130000Z`));
+  expect(fp(`${property};VALUE=DATE:20261008,20261009`)).toBe(
+    fp(`${property};VALUE=DATE:20261009`, `${property};VALUE=DATE:20261008`),
+  );
+  expect(fp(`${property};VALUE=DATE:20261008`)).not.toBe(fp(`${property}:20261008T000000Z`));
+  expect(fp(`${property}:20261008T090000`)).not.toBe(fp(`${property}:20261008T090000Z`));
+});
+
+it("preserves period semantics and timezones in RDATE", () => {
+  const fp = (date: string) => fingerprint(["BEGIN:VEVENT", "UID:period", date, "END:VEVENT"]);
+  expect(fp("RDATE;VALUE=PERIOD;TZID=America/New_York:20261008T090000/20261008T100000")).toBe(
+    fp("RDATE;VALUE=PERIOD:20261008T130000Z/20261008T140000Z"),
+  );
+  expect(fp("RDATE;VALUE=PERIOD;TZID=America/New_York:20261008T090000/PT1H")).not.toBe(
+    fp("RDATE;VALUE=PERIOD;TZID=America/Los_Angeles:20261008T090000/PT1H"),
+  );
+});
