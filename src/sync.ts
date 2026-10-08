@@ -8,7 +8,7 @@
 // missing originals or mirrors propagate deletion after an exact UID lookup.
 // Originals are stamped only after mirror creation when deletion is enabled.
 
-import { hasInvitations, reconcileLinks, type LinkStore } from "./links.js";
+import { hasInvitations, protectedOriginal, reconcileLinks, type LinkStore } from "./links.js";
 
 import type { CalDavAuth, CalDavEvent } from "./caldav.js";
 import { deleteEvent, findByUid, listEvents, putEvent, scopedAuth, type RequestOptions } from "./caldav.js";
@@ -30,9 +30,21 @@ import {
 } from "./ics.js";
 
 import { actionNotice, performAction, ActionObserverError, type ActionHooks, type ActionNotice } from "./execution.js";
+import {
+  isGoogleMirrorWrite,
+  putGoogleMirror,
+  recoverGoogleMirrorWrite,
+  type GoogleMirrorStore,
+} from "./google-mirror.js";
 
 export type SyncOptions = RequestOptions &
-  ActionHooks & { dryRun?: boolean; linkStore?: LinkStore; maxDeletes?: number; allowEmptyDeletes?: boolean };
+  ActionHooks & {
+    dryRun?: boolean;
+    linkStore?: LinkStore;
+    googleMirrorStore?: GoogleMirrorStore;
+    maxDeletes?: number;
+    allowEmptyDeletes?: boolean;
+  };
 
 export type Side = { id: string; auth: CalDavAuth; url: string };
 export type Pair = {
@@ -42,6 +54,7 @@ export type Pair = {
   propagateDeletes?: boolean;
   protectInvitations?: boolean;
   existingLinks?: boolean;
+  heldOriginals?: { side: string; uid: string; reason: string }[];
 };
 export type Window = { start: Date; end: Date };
 
@@ -124,7 +137,7 @@ export function planDirection(
     const mirror = mirrors.get(uid);
     const mUid = mirrorUid(from.id, uid);
     const stamped = orig.mirroredOn.includes(to.id);
-    const protectedInvitation = opts.protectInvitations && hasInvitations(orig);
+    const protectedInvitation = opts.protectInvitations && protectedOriginal(orig, from.id);
     if (!mirror && stamped && propagate && !protectedInvitation) {
       // The stamp says a mirror existed; it is gone → a human deleted it → delete the original too.
       actions.push({
@@ -212,10 +225,23 @@ export function planDirection(
   return actions;
 }
 
-export const plan = (pair: Pair, a: Parsed[], b: Parsed[]): Action[] => [
-  ...planDirection(pair.a, pair.b, a, b, pair),
-  ...planDirection(pair.b, pair.a, b, a, pair),
-];
+export const plan = (pair: Pair, a: Parsed[], b: Parsed[]): Action[] => {
+  for (const hold of pair.heldOriginals ?? []) {
+    if (![pair.a.id, pair.b.id].includes(hold.side) || !hold.uid || !hold.reason)
+      throw new Error("Invalid held original binding");
+    const event = (hold.side === pair.a.id ? a : b).find((event) => event.uid === hold.uid);
+    if (event?.source) throw new Error("A held original has become a mirror");
+  }
+  const keep = (event: Parsed, side: string) =>
+    !(pair.heldOriginals ?? []).some(
+      (hold) =>
+        (side === hold.side && event.uid === hold.uid) ||
+        (event.source?.side === hold.side && event.source.uid === hold.uid),
+    );
+  a = a.filter((event) => keep(event, pair.a.id));
+  b = b.filter((event) => keep(event, pair.b.id));
+  return [...planDirection(pair.a, pair.b, a, b, pair), ...planDirection(pair.b, pair.a, b, a, pair)];
+};
 
 export type PairResult = {
   pair: string;
@@ -247,6 +273,12 @@ export async function syncPair(pair: Pair, win: Window | undefined, opts: SyncOp
     b: { ...pair.b, auth: scopedAuth(pair.b.auth, opts) },
   };
   if (pair.a.id === pair.b.id) throw new Error("Sync sides must have distinct IDs");
+  if (opts.googleMirrorStore)
+    await recoverGoogleMirrorWrite([pair.a, pair.b], opts.googleMirrorStore, {
+      ...opts,
+      pair: pair.name,
+      heldOriginals: pair.heldOriginals,
+    });
   const load = async (s: Side) =>
     (await listEvents(s.auth, s.url, win)).map(parse).filter((e): e is Parsed => e != null);
   const [a, b] = await Promise.all([load(pair.a), load(pair.b)]);
@@ -318,6 +350,17 @@ export async function syncPair(pair: Pair, win: Window | undefined, opts: SyncOp
     result.warnings!.push(
       "Invitation-bearing originals are protected: edits and mirror-deletion stamps are not written to them",
     );
+  if (
+    pair.protectInvitations &&
+    [pair.a, pair.b].some(
+      (side, i) =>
+        side.id === "google" &&
+        [a, b][i].some((event) => !event.source && !hasInvitations(event) && protectedOriginal(event, side.id)),
+    )
+  )
+    result.warnings!.push("Native Google conferences are protected: edit the original in Google");
+  if (pair.heldOriginals?.length)
+    result.warnings!.push(`${pair.heldOriginals.length} original/mirror pairs are explicitly held for review`);
   if (opts.dryRun) return { ...result, actions, ...(linked ? { linkedActions: linked.actions } : {}) };
 
   const sides = new Map([pair.a, pair.b].map((s) => [s.id, s]));
@@ -335,7 +378,14 @@ export async function syncPair(pair: Pair, win: Window | undefined, opts: SyncOp
     });
     try {
       if (act.kind === "put") {
-        await performAction(notice, () => putEvent(side.auth, act.href, act.ics, act.etag), opts);
+        await performAction(
+          notice,
+          () =>
+            opts.googleMirrorStore && isGoogleMirrorWrite(side, act.ics)
+              ? putGoogleMirror(side, act.href, act.ics, act.etag, opts.googleMirrorStore)
+              : putEvent(side.auth, act.href, act.ics, act.etag),
+          opts,
+        );
         act.etag ? result.updated++ : result.created++;
       } else {
         const other = sides.get(act.kind === "delete-if-orphan" ? act.sourceSide : act.mirrorSide)!;

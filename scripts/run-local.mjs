@@ -2,7 +2,14 @@ import { readFile, writeFile, rename, mkdir, appendFile, readdir, rm, open } fro
 import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { gzipSync } from "node:zlib";
-import { loadConfig, pairsFor, syncPair, listEvents, providerUrlPolicy } from "../dist/index.js";
+import {
+  loadConfig,
+  pairsFor,
+  syncPair,
+  listEvents,
+  providerUrlPolicy,
+  googleCalendarRestPolicy,
+} from "../dist/index.js";
 
 const configPath = resolve(process.argv[2] ?? "");
 const dryRun = process.argv.includes("--dry");
@@ -12,7 +19,8 @@ const dir = dirname(configPath);
 const config = loadConfig(JSON.parse(await readFile(configPath, "utf8")));
 if (!config.window.allEvents || config.dedupe) throw Error("Local runner requires allEvents and no AI deduplication");
 const pairs = pairsFor(config, {
-  allowUrl: (url) => providerUrlPolicy("google")(url) || providerUrlPolicy("icloud")(url),
+  allowUrl: (url) =>
+    providerUrlPolicy("google")(url) || providerUrlPolicy("icloud")(url) || googleCalendarRestPolicy(url),
 });
 if (!pairs.length) throw Error("No configured calendar pairs");
 const urls = new Set();
@@ -58,6 +66,18 @@ try {
       save: (state) => atomicJson(storePath, state),
     };
     await linkStore.load();
+    const googleMirrorPath = join(dir, `${pair.name}.google-mirror-write.json`);
+    const googleMirrorStore = {
+      load: async () => {
+        try {
+          return JSON.parse(await readFile(googleMirrorPath, "utf8"));
+        } catch (error) {
+          if (error.code === "ENOENT") return null;
+          throw error;
+        }
+      },
+      save: (intent) => atomicJson(googleMirrorPath, intent),
+    };
     if (!dryRun) {
       const snapshots = await Promise.all(
         [pair.a, pair.b].map(async (side) => ({ url: side.url, events: await listEvents(side.auth, side.url) })),
@@ -73,6 +93,7 @@ try {
     }
     const result = await syncPair(pair, undefined, {
       linkStore,
+      googleMirrorStore,
       dryRun,
       signal: AbortSignal.timeout(45 * 60_000),
       beforeAction: (notice) => journal({ phase: "before", ...notice }),

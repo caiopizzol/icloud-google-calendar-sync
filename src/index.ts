@@ -7,3 +7,4 @@ export * from "./google.js";
 export { ActionObserverError, type ActionNotice, type ActionOutcome, type ActionHooks } from "./execution.js";
 
 export * from "./links.js";
+export * from "./google-mirror.js";

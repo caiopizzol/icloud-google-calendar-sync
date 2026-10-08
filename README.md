@@ -508,6 +508,21 @@ ordinary CLI and HTTP handler cannot supply this private filesystem state. Use
 `--dry` with the guarded runner to inspect both mirror and linked actions. Sample
 systemd user units are in `deploy/`; install only one active runner.
 
+The runner verifies Google mirror writes and keeps a durable
+`<pair-name>.google-mirror-write.json` until they finish. Google CalDAV can generate
+new conference details or replace a joining link during import. For recognized
+Meet, Teams and Zoom transformations, the runner conditionally restores the intended
+notes/location through the Calendar REST API and clears generated conference data
+on its own copies. Recurring masters and explicit exceptions are checked separately.
+An unfinished correction is recovered before planning another sync. Unknown formats
+or conflicting edits stop the run with the intent retained; do not delete that file
+to bypass recovery.
+
+An individual original and its marked mirror can be held using a pair's
+`heldOriginals: [{ "side": "icloud", "uid": "exact-original-uid", "reason": "review reason" }]`.
+Both endpoints are excluded together, including deletion propagation. Holds are
+reported on every run. Use `reviewOnChange` for existing links instead.
+
 By default, `syncPair` refuses deletions when either full calendar snapshot is empty
 and stops plans exceeding ten deletions per pair. The limit also applies during
 execution if provider state changes after the preview. Dry runs remain available for
@@ -517,6 +532,8 @@ after reviewing the state; the guarded runner keeps the defaults.
 `protectInvitations` allows invitation-bearing originals to be copied out, but holds
 writes back to those originals and does not stamp them for mirror-deletion propagation.
 Changes made directly on their provider still refresh their mirrors. This avoids
-incidental invitation updates during synchronization. Reminder-only edits are not
+incidental invitation updates during synchronization. This protection also covers native Google
+conferences: edit those originals in Google, because a CalDAV write can change
+conference details even when it only adds a synchronization marker. Reminder-only edits are not
 tracked by the event fingerprint. Simultaneous edits use a whole-event winner rather
 than combining fields. Review these limits before enabling automatic synchronization.

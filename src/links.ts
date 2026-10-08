@@ -31,6 +31,18 @@ export type LinkStore = {
 
 export const hasInvitations = (event: Parsed) => event.lines.some((l) => /^(ATTENDEE|ORGANIZER)[;:]/i.test(l));
 
+/** Google CalDAV can replace conference details even on a metadata-only PUT. */
+export const protectedOriginal = (event: Parsed, side: string) =>
+  hasInvitations(event) ||
+  (side === "google" &&
+    event.lines.some(
+      (line) =>
+        /^(CONFERENCE|X-GOOGLE-CONFERENCE|X-RDCAL-CONFERENCEINFO|X-MICROSOFT-ONLINEMEETING[^;:]*)[;:]/i.test(line) ||
+        /^(DESCRIPTION|LOCATION|URL)[;:].*https?:\/\/(?:meet\.google\.com|teams\.microsoft\.com|(?:[^/]+\.)?zoom\.us)\//i.test(
+          line,
+        ),
+    ));
+
 /** Links are explicitly adopted originals, never an unchecked event exclusion list. */
 export function validateLinks(pair: Pair, snapshots: [Parsed[], Parsed[]], state: LinkState): void {
   if (
@@ -42,6 +54,13 @@ export function validateLinks(pair: Pair, snapshots: [Parsed[], Parsed[]], state
     throw new Error("Existing-link state does not match this calendar pair");
   const endpoints = [new Set<string>(), new Set<string>()];
   for (const link of state.links) {
+    if (
+      pair.heldOriginals?.some(
+        (hold) =>
+          (hold.side === pair.a.id && hold.uid === link.aUid) || (hold.side === pair.b.id && hold.uid === link.bUid),
+      )
+    )
+      throw new Error("Use reviewOnChange to hold an existing link");
     for (const [i, side] of ["a", "b"].entries()) {
       const uid = side === "a" ? link.aUid : link.bUid;
       const fp = side === "a" ? link.aFp : link.bFp;
@@ -117,7 +136,11 @@ export async function reconcileLinks(pair: Pair, snapshots: [Parsed[], Parsed[]]
       const side = a ? pair.a : pair.b;
       const missingSide = a ? pair.b : pair.a;
       const missingUid = a ? link.bUid : link.aUid;
-      if (link.reviewOnChange || !pair.propagateDeletes || (pair.protectInvitations && hasInvitations(survivor))) {
+      if (
+        link.reviewOnChange ||
+        !pair.propagateDeletes ||
+        (pair.protectInvitations && protectedOriginal(survivor, side.id))
+      ) {
         result.skipped++;
         result.warnings.push("Existing-link deletion held by deletion/invitation policy");
         continue;
@@ -200,9 +223,9 @@ export async function reconcileLinks(pair: Pair, snapshots: [Parsed[], Parsed[]]
       const targetKey = aChanged && (!bChanged || a.modified > b.modified) ? "b" : "a";
       const source = targetKey === "b" ? a : b;
       const target = events[targetKey];
-      if (link.reviewOnChange || (pair.protectInvitations && hasInvitations(target))) {
+      if (link.reviewOnChange || (pair.protectInvitations && protectedOriginal(target, pair[targetKey].id))) {
         result.skipped++;
-        result.warnings.push("Existing-link edit held to avoid changing an invitation-bearing original");
+        result.warnings.push("Existing-link edit held to protect an invitation or native Google conference");
         continue;
       }
       if (!target.etag) throw new Error("Existing-link update requires an ETag");
@@ -219,7 +242,7 @@ export async function reconcileLinks(pair: Pair, snapshots: [Parsed[], Parsed[]]
     const pending = link.pending;
     const target = events[pending.target];
     const side = pair[pending.target];
-    if (link.reviewOnChange || (pair.protectInvitations && hasInvitations(target))) {
+    if (link.reviewOnChange || (pair.protectInvitations && protectedOriginal(target, side.id))) {
       result.skipped++;
       result.warnings.push("Pending existing-link edit held by invitation policy");
       continue;

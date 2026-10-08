@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CalDavEvent } from "../src/caldav.js";
 import { fingerprint, fold, toMirror, unfold } from "../src/ics.js";
-import { parse, planDirection, type Parsed, type Side } from "../src/sync.js";
+import { parse, plan, planDirection, type Parsed, type Side } from "../src/sync.js";
 
 const google: Side = {
   id: "google",
@@ -54,6 +54,44 @@ function mirrorOf(
 }
 
 describe("planDirection", () => {
+  it("holds both endpoints without treating either exclusion as a deletion", () => {
+    const src = ev("https://g/events/held.ics", ics("held", "Held"));
+    const copy = mirrorOf(src, google, { edits: (line) => (line === "SUMMARY:Held" ? "SUMMARY:Changed" : line) });
+    const pair = {
+      name: "test",
+      a: google,
+      b: icloud,
+      propagateDeletes: true,
+      heldOriginals: [{ side: "google", uid: src.uid, reason: "Unsupported time semantics" }],
+    };
+    expect(plan(pair, [src], [copy])).toEqual([]);
+    expect(plan(pair, [], [copy])).toEqual([]);
+    expect(plan(pair, [src], [])).toEqual([]);
+    const unrelated = ev("https://g/events/other.ics", ics("other", "Other", undefined, []));
+    expect(plan(pair, [src, unrelated], [copy])).toHaveLength(2);
+  });
+
+  it("copies native Google conferences without stamping or editing their originals", () => {
+    const src = ev(
+      "https://g/events/conference.ics",
+      ics("conference", "Meeting", "20260901T000000Z", ["LOCATION:https://meet.google.com/aaa-bbbb-ccc"]),
+    );
+    const options = { propagateDeletes: true, protectInvitations: true };
+    const created = planDirection(google, icloud, [src], [], options);
+    expect(created.map((action) => action.on)).toEqual(["icloud"]);
+    const edited = mirrorOf(src, google, {
+      edits: (line) => (line === "SUMMARY:Meeting" ? "SUMMARY:Edited copy" : line),
+      modified: "20260909T000000Z",
+    });
+    expect(planDirection(google, icloud, [src], [edited], options)).toEqual([]);
+    const stamped = ev(src.href, src.ics.replace("END:VEVENT", "X-SYNC-MIRRORED:icloud\r\nEND:VEVENT"));
+    expect(
+      planDirection(google, icloud, [stamped], [], options).every(
+        (action) => action.kind === "put" && action.on === "icloud",
+      ),
+    ).toBe(true);
+  });
+
   it("creates a mirror for a new original, with no attendees, and stamps the original", () => {
     const flight = ev("https://g/events/f.ics", ics("f", "Flight", "20260901T000000Z", ["ATTENDEE:mailto:x@y.z"]));
     const actions = planDirection(google, icloud, [flight], [], { propagateDeletes: true });

@@ -28,6 +28,7 @@ export type PairSpec = {
   propagateDeletes?: boolean;
   protectInvitations?: boolean;
   existingLinks?: boolean;
+  heldOriginals?: { side: string; uid: string; reason: string }[];
 };
 export type WindowDays = { pastDays: number; futureDays: number; allEvents?: boolean };
 
@@ -62,7 +63,10 @@ export function parsePairSpecs(raw: unknown): PairSpec[] {
   if (!Array.isArray(v)) throw new Error("pairs must be an array");
   return v.map((p, i) => {
     if (!p || typeof p !== "object") throw new Error(`pairs[${i}] must be an object`);
-    const { name, a, b, propagateDeletes, protectInvitations, existingLinks } = p as Record<string, unknown>;
+    const { name, a, b, propagateDeletes, protectInvitations, existingLinks, heldOriginals } = p as Record<
+      string,
+      unknown
+    >;
     if (typeof name !== "string" || typeof a !== "string" || typeof b !== "string") {
       throw new Error(`pairs[${i}] needs string name, a, b`);
     }
@@ -73,6 +77,21 @@ export function parsePairSpecs(raw: unknown): PairSpec[] {
       throw new Error(`pairs[${i}].protectInvitations must be a boolean`);
     if (existingLinks !== undefined && typeof existingLinks !== "boolean")
       throw new Error(`pairs[${i}].existingLinks must be a boolean`);
+    if (
+      heldOriginals !== undefined &&
+      (!Array.isArray(heldOriginals) ||
+        heldOriginals.some(
+          (hold) =>
+            !hold ||
+            typeof hold.side !== "string" ||
+            ![a.split(":")[0], b.split(":")[0]].includes(hold.side) ||
+            typeof hold.uid !== "string" ||
+            !hold.uid ||
+            typeof hold.reason !== "string" ||
+            !hold.reason,
+        ))
+    )
+      throw new Error(`pairs[${i}].heldOriginals must bind explicit originals with a reason`);
     return {
       name,
       a,
@@ -80,6 +99,7 @@ export function parsePairSpecs(raw: unknown): PairSpec[] {
       ...(existingLinks === undefined ? {} : { existingLinks }),
       ...(propagateDeletes === undefined ? {} : { propagateDeletes }),
       ...(protectInvitations === undefined ? {} : { protectInvitations }),
+      ...(heldOriginals === undefined ? {} : { heldOriginals }),
     };
   });
 }
