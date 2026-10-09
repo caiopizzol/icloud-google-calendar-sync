@@ -44,6 +44,28 @@ describe("findByUid", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("unavailable", { status: 503 })));
     await expect(findByUid(auth, calendar, "wanted")).rejects.toThrow("503");
   });
+  it.each(["wanted", "absent"])("finds an iCloud UID without an unsupported property filter: %s", async (uid) => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(
+          `<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">${collectionResponse}${response("wanted", 0)}</d:multistatus>`,
+          { status: 207 },
+        ),
+      );
+    vi.stubGlobal("fetch", fetch);
+    const event = await findByUid(auth, "https://p44-caldav.icloud.com/events/", uid);
+    expect(event?.href ?? null).toBe(uid === "wanted" ? "https://p44-caldav.icloud.com/events/0.ics" : null);
+    expect(fetch.mock.calls[0][1].body).not.toContain("prop-filter");
+    expect(fetch.mock.calls[0][1].body).not.toContain("time-range");
+  });
+
+  it("does not use the iCloud compatibility query on another host", async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response('<d:multistatus xmlns:d="DAV:"/>', { status: 207 }));
+    vi.stubGlobal("fetch", fetch);
+    await findByUid(auth, "https://p44-caldav.icloud.com.attacker.example/events/", "wanted");
+    expect(fetch.mock.calls[0][1].body).toContain("prop-filter");
+  });
 });
 
 it("requests expanded occurrences only for review", async () => {
@@ -88,4 +110,44 @@ it("refuses unconditional deletion and prevents redirect following", async () =>
   fetch.mockResolvedValue(new Response(null, { status: 204 }));
   await dav(auth, "DELETE", calendar + "x.ics");
   expect(fetch.mock.calls[0][1]).toMatchObject({ redirect: "error", signal: expect.any(AbortSignal) });
+});
+
+const collectionResponse = `<d:response><d:href>/events/</d:href>
+  <d:propstat><d:prop><d:getetag>"collection"</d:getetag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+  <d:propstat><d:prop><c:calendar-data/></d:prop><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat>
+</d:response>`;
+
+it.each([
+  collectionResponse.replace("404 Not Found", "403 Forbidden"),
+  collectionResponse.replace("/events/", "/events/missing.ics"),
+  collectionResponse.replace("<c:calendar-data/>", "<c:calendar-data/><d:getetag/>"),
+])("does not turn failed calendar access or child properties into absence %#", async (body) => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue(new Response(`<d:multistatus>${body}</d:multistatus>`, { status: 207 })),
+  );
+  await expect(findByUid(auth, "https://p44-caldav.icloud.com/events/", "wanted")).rejects.toThrow();
+});
+
+it.each([
+  collectionResponse.replace("404 Not Found", "507 Insufficient Storage"),
+  collectionResponse.replace("<c:calendar-data/>", "<c:calendar-data>incomplete</c:calendar-data>"),
+  collectionResponse.replace("/events/", "https://p45-caldav.icloud.com/events/"),
+  collectionResponse.replace("/events/", "/events"),
+])("rejects incomplete or nonmatching collection responses %#", async (xml) => {
+  const { parseEvents } = await import("../src/caldav.js");
+  expect(() => parseEvents(`<d:multistatus>${xml}</d:multistatus>`, "https://p44-caldav.icloud.com/events/")).toThrow();
+});
+
+it.each(["<d:error/>", "<d:responsedescription>Incomplete</d:responsedescription>"])(
+  "rejects an error in a collection-only response: %s",
+  async (extra) => {
+    const { parseEvents } = await import("../src/caldav.js");
+    const xml = `<d:multistatus>${collectionResponse.replace("</d:response>", extra + "</d:response>")}</d:multistatus>`;
+    expect(() => parseEvents(xml, "https://p44-caldav.icloud.com/events/")).toThrow();
+  },
+);
+it("does not accept an iCloud collection-only shape from another provider", async () => {
+  const { parseEvents } = await import("../src/caldav.js");
+  expect(() => parseEvents(`<d:multistatus>${collectionResponse}</d:multistatus>`, calendar)).toThrow();
 });

@@ -209,9 +209,29 @@ export const findByUid = async (auth: CalDavAuth, calendar: string, uid: string)
     await query(
       auth,
       calendar,
-      `<c:prop-filter name="UID"><c:text-match collation="i;octet">${escapeXml(uid)}</c:text-match></c:prop-filter>`,
+      providerUrlPolicy("icloud")(new URL(calendar))
+        ? ""
+        : `<c:prop-filter name="UID"><c:text-match collation="i;octet">${escapeXml(uid)}</c:text-match></c:prop-filter>`,
     )
   ).find((event) => uidOf(unfold(event.ics)) === uid) ?? null;
+
+function collectionWithoutEventData(response: string): boolean {
+  const propstats = [...response.matchAll(/<(?:[\w-]+:)?propstat(?:\s[^>]*)?>([\s\S]*?)<\/(?:[\w-]+:)?propstat>/gi)];
+  const statuses = propstats.map(([, propstat]) => /\s(\d{3})\b/.exec(tag(propstat, "status") ?? "")?.[1]);
+  return (
+    [...response.matchAll(/<(?:[\w-]+:)?status(?:\s|>)/g)].length === propstats.length &&
+    !/<(?:[\w-]+:)?(?:error|responsedescription)(?:\s|>|\/)/i.test(response) &&
+    tag(response, "getetag") !== null &&
+    statuses.includes("200") &&
+    statuses.includes("404") &&
+    propstats.every(([, propstat], i) =>
+      statuses[i] === "200"
+        ? true
+        : statuses[i] === "404" &&
+          /^<(?:[\w-]+:)?calendar-data(?:\s[^>]*)?\s*\/>$/.test((tag(propstat, "prop") ?? "").trim()),
+    )
+  );
+}
 
 export function parseEvents(multistatus: string, base: string): CalDavEvent[] {
   if (
@@ -227,13 +247,22 @@ export function parseEvents(multistatus: string, base: string): CalDavEvent[] {
   if (!entries.length && content?.trim()) throw new Error("Unexpected CalDAV multistatus content");
   return entries.flatMap((r) => {
     const statuses = [...r.matchAll(/<(?:[\w-]+:)?status[^>]*>[^<]*?\s(\d{3})\b/gi)];
-    if (statuses.some((s) => Number(s[1]) >= 400)) throw new Error("CalDAV query contains failed resource properties");
     const href = tag(r, "href");
     const data = tag(r, "calendar-data");
-    if (!href || data == null) throw new Error("CalDAV query is missing resource data");
+    if (!href) throw new Error("CalDAV query is missing resource data");
     const resolved = resolveHref(base, href);
     const collection = new URL(base);
     const resource = new URL(resolved);
+    // iCloud includes the collection itself with no calendar-data.
+    if (
+      providerUrlPolicy("icloud")(collection) &&
+      resource.href === collection.href &&
+      data == null &&
+      collectionWithoutEventData(r)
+    )
+      return [];
+    if (statuses.some((s) => Number(s[1]) >= 400)) throw new Error("CalDAV query contains failed resource properties");
+    if (data == null) throw new Error("CalDAV query is missing resource data");
     if (
       resource.origin !== collection.origin ||
       !resource.pathname.startsWith(collection.pathname.endsWith("/") ? collection.pathname : collection.pathname + "/")
