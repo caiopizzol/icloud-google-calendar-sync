@@ -253,6 +253,11 @@ side IDs (the config loader uses `google` and `icloud`).
   Google-side mirror looks edited on the next run and ping-pongs.
 - **Google CalDAV needs the CalDAV API enabled** separately from the Calendar
   API, in the same Cloud project.
+- **Google-generated Meet footers** on a Google mirror are ignored when they
+  are its only content change. The original keeps its meeting link; the Google
+  copy may show both links. Edits inside the recognized footer do not sync back.
+  Only the known English footer is recognized; location removal, legacy Hangouts
+  rewrites and other conference formats still follow normal edit handling.
 
 ## Development
 

@@ -42,6 +42,22 @@ export function fold(lines: string[]): string {
 export const propName = (line: string): string => (/^[A-Za-z0-9-]+/.exec(line)?.[0] ?? "").toUpperCase();
 export const propValue = (line: string): string => line.slice(line.indexOf(":") + 1);
 
+const MEET_BOUNDARY = "-::~:~::~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~::~:~::-";
+const MEET_FOOTER = new RegExp(
+  String.raw`(?:^|\\n\\n)${MEET_BOUNDARY}\\nJoin with Google Meet: https://meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}\\n\\n` +
+    String.raw`(?:The Google Meet link was automatically updated to keep the meeting private and secure\. Learn more about Google Meet meeting codes at: \\nhttps://support\.google\.com/(?:meet\?p=meeting_codes|calendar\?p=meeting_code_reuse)\\n\\n)?` +
+    String.raw`Please do not edit this section\.\\n${MEET_BOUNDARY}$`,
+);
+
+/** For Google mirror comparison only; keep stored content and fingerprints intact. */
+export function withoutGoogleMeetFooter(lines: string[]): string[] {
+  return lines.map((line) => {
+    if (propName(line) !== "DESCRIPTION") return line;
+    const value = propValue(line);
+    return line.slice(0, line.length - value.length) + value.replace(MEET_FOOTER, "");
+  });
+}
+
 /** First VEVENT's value for a property, or null. */
 export function eventProp(lines: string[], name: string): string | null {
   let depth = 0;

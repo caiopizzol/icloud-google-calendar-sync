@@ -22,6 +22,7 @@ import {
   toOriginal,
   uidOf,
   unfold,
+  withoutGoogleMeetFooter,
   withMirrored,
   X_FP,
 } from "./ics.js";
@@ -136,8 +137,16 @@ export function planDirection(
         ),
       );
     }
+    const withoutFooter = mirror && to.id === "google" ? fingerprint(withoutGoogleMeetFooter(mirror.lines)) : null;
+    const generatedFooterOnly =
+      mirror &&
+      withoutFooter !== null &&
+      withoutFooter !== mirror.fp &&
+      mirror.fp !== mirror.fpAtCopy &&
+      (withoutFooter === mirror.fpAtCopy || withoutFooter === fingerprint(withoutGoogleMeetFooter(orig.lines)));
     const mirrorEdited =
       mirror &&
+      !generatedFooterOnly &&
       orig.fp !== mirror.fp &&
       mirror.fp !== mirror.fpAtCopy &&
       (orig.fp === mirror.fpAtCopy || mirror.modified > orig.modified);
@@ -149,7 +158,7 @@ export function planDirection(
     }
     if (!mirror) {
       continue;
-    } else if (orig.fp === mirror.fpAtCopy && mirror.fp === mirror.fpAtCopy) {
+    } else if (orig.fp === mirror.fpAtCopy && (mirror.fp === mirror.fpAtCopy || generatedFooterOnly)) {
       continue;
     } else if (orig.fp === mirror.fp) {
       // Same content, stale stamp (e.g. fingerprint rules changed): fix the stamp only.
