@@ -40,7 +40,35 @@ export function fold(lines: string[]): string {
 }
 
 export const propName = (line: string): string => (/^[A-Za-z0-9-]+/.exec(line)?.[0] ?? "").toUpperCase();
-export const propValue = (line: string): string => line.slice(line.indexOf(":") + 1);
+function unquotedIndexOf(text: string, separator: string): number {
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '"') quoted = !quoted;
+    else if (!quoted && text[i] === separator) return i;
+  }
+  return -1;
+}
+
+function contentLine(line: string, legacy = false): { head: string; value: string } {
+  const colon = legacy ? line.indexOf(":") : unquotedIndexOf(line, ":");
+  return { head: line.slice(0, colon), value: line.slice(colon + 1) };
+}
+
+function parameterValue(head: string, name: string): string | undefined {
+  let rest = head;
+  while (rest) {
+    const semicolon = unquotedIndexOf(rest, ";");
+    const parameter = semicolon < 0 ? rest : rest.slice(0, semicolon);
+    if (parameter.toUpperCase().startsWith(`${name}=`)) {
+      return parameter.slice(name.length + 1).replace(/^"(.*)"$/, "$1");
+    }
+    if (semicolon < 0) break;
+    rest = rest.slice(semicolon + 1);
+  }
+  return undefined;
+}
+
+export const propValue = (line: string): string => contentLine(line).value;
 
 /** First VEVENT's value for a property, or null. */
 export function eventProp(lines: string[], name: string): string | null {
@@ -130,9 +158,14 @@ function zoneOffsetMin(tz: string, utcMs: number): number | null {
 
 /** DTSTART/DTEND/RECURRENCE-ID → comparable string (epoch ms, or the date, or the literal). */
 export function normalizeDateLine(line: string): string {
+  return normalizedDateLine(line, false);
+}
+
+function normalizedDateLine(line: string, legacy: boolean): string {
   const name = propName(line);
-  const value = propValue(line).trim();
-  const tz = /;TZID="?([^;:"]+)/i.exec(line)?.[1];
+  const { head, value: rawValue } = contentLine(line, legacy);
+  const value = rawValue.trim();
+  const tz = legacy ? /;TZID="?([^;:"]+)/i.exec(line)?.[1] : parameterValue(head, "TZID");
   const m = /^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})(Z?))?$/.exec(value);
   if (!m) return `${name}=${value}`;
   if (!m[4]) return `${name}=D${value}`;
@@ -156,7 +189,7 @@ const normalizeText = (v: string) =>
     .trim();
 
 /** Stable fingerprint of the human-visible content of every VEVENT in the file. */
-export function fingerprint(lines: string[]): string {
+export function fingerprint(lines: string[], legacyContentLines = false): string {
   let sig: string[] = [];
   const components: string[][] = [];
   let depth = 0; // 1 inside VEVENT, 2 inside a VALARM within it
@@ -170,9 +203,9 @@ export function fingerprint(lines: string[]): string {
     else if (l === "END:VALARM") depth = 1;
     else if (depth === 1 && FP_PROPS.has(propName(l))) {
       const name = propName(l);
-      if (/^(DTSTART|DTEND|RECURRENCE-ID)$/.test(name)) sig.push(normalizeDateLine(l));
+      if (/^(DTSTART|DTEND|RECURRENCE-ID)$/.test(name)) sig.push(normalizedDateLine(l, legacyContentLines));
       else {
-        const value = normalizeText(propValue(l));
+        const value = normalizeText(contentLine(l, legacyContentLines).value);
         if (value && DEFAULTS[name] !== value) sig.push(`${name}=${value}`);
       }
     }
@@ -181,6 +214,10 @@ export function fingerprint(lines: string[]): string {
   const content = signatures.length <= 1 ? (signatures[0] ?? "") : JSON.stringify(signatures);
   return createHash("sha1").update(content).digest("hex").slice(0, 16);
 }
+
+/** Recognize saved fingerprints from before quoted-parameter parsing was corrected. */
+export const matchesFingerprint = (lines: string[], baseline: string | null): boolean =>
+  baseline !== null && (fingerprint(lines) === baseline || fingerprint(lines, true) === baseline);
 
 // --- mirror construction ---------------------------------------------------
 

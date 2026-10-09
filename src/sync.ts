@@ -15,6 +15,7 @@ import {
   fingerprint,
   fold,
   lastModifiedMs,
+  matchesFingerprint,
   mirroredOn,
   mirrorUid,
   sourceRef,
@@ -113,6 +114,15 @@ export function planDirection(
     const mirror = mirrors.get(uid);
     const mUid = mirrorUid(from.id, uid);
     const stamped = orig.mirroredOn.includes(to.id);
+    if (
+      mirror &&
+      orig.fp !== mirror.fp &&
+      orig.fp !== mirror.fpAtCopy &&
+      mirror.fp !== mirror.fpAtCopy &&
+      matchesFingerprint(orig.lines, mirror.fpAtCopy) &&
+      matchesFingerprint(mirror.lines, mirror.fpAtCopy)
+    )
+      throw new Error(`Ambiguous legacy fingerprint for ${uid}; review the original and mirror before syncing`);
     if (!mirror && stamped && propagate) {
       // The stamp says a mirror existed; it is gone → a human deleted it → delete the original too.
       actions.push({
@@ -139,8 +149,8 @@ export function planDirection(
     const mirrorEdited =
       mirror &&
       orig.fp !== mirror.fp &&
-      mirror.fp !== mirror.fpAtCopy &&
-      (orig.fp === mirror.fpAtCopy || mirror.modified > orig.modified);
+      !matchesFingerprint(mirror.lines, mirror.fpAtCopy) &&
+      (matchesFingerprint(orig.lines, mirror.fpAtCopy) || mirror.modified > orig.modified);
     if (propagate && !stamped && !mirrorEdited) {
       actions.push({
         ...put(from.id, orig, withMirrored(orig.lines, to.id), `stamp ${uid} as mirrored on ${to.id}`),
