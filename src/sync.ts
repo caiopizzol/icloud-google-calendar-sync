@@ -28,7 +28,12 @@ import {
 
 import { actionNotice, performAction, ActionObserverError, type ActionHooks } from "./execution.js";
 
-export type SyncOptions = RequestOptions & ActionHooks & { dryRun?: boolean };
+export type SyncOptions = RequestOptions &
+  ActionHooks & {
+    dryRun?: boolean;
+    maxDeletes?: number;
+    allowEmptyDeletes?: boolean;
+  };
 
 export type Side = { id: string; auth: CalDavAuth; url: string };
 export type Pair = { name: string; a: Side; b: Side; propagateDeletes?: boolean };
@@ -251,6 +256,13 @@ export async function syncPair(pair: Pair, win: Window, opts: SyncOptions = {}):
     }
   }
   const actions = plan(pair, a, b);
+  const maxDeletes = opts.maxDeletes ?? 10;
+  if (!Number.isInteger(maxDeletes) || maxDeletes < 0) throw new Error("maxDeletes must be a nonnegative integer");
+  const deleteCount = actions.filter((action) => action.kind !== "put").length;
+  if (!opts.dryRun && deleteCount > maxDeletes)
+    throw new Error(`Deletion limit exceeded: ${deleteCount} proposed, limit ${maxDeletes}`);
+  if (!opts.dryRun && deleteCount && (!a.length || !b.length) && opts.allowEmptyDeletes !== true)
+    throw new Error("Refusing deletions while a calendar is empty; inspect a dry run before explicitly overriding");
   const result: PairResult = {
     pair: pair.name,
     a: a.length,

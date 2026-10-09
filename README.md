@@ -57,6 +57,12 @@ A missing mirror deletes its stamped original; a missing original deletes its
 mirror. Both require an exact UID lookup across all dates to confirm absence
 and an ETag for a conditional deletion. Failed or incomplete CalDAV reports stop
 the operation; they do not count as an empty calendar.
+Deletion-enabled runs stop before writing if a calendar is empty or more than ten
+deletions are planned. Inspect a dry run before proceeding. Library callers can
+explicitly override these limits with `syncPair(pair, window, { maxDeletes,
+allowEmptyDeletes: true })`; `maxDeletes: 0` blocks all deletions. These guards do
+not prove that a nonempty provider response is complete.
+
 Omitting the option or setting `"propagateDeletes": false` disables both kinds
 of deletion, including for events stamped by an earlier version.
 
